@@ -857,10 +857,14 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                         cl_ord_id,
                                     )
                                 except Exception as protection_exc:
-                                    print(f"[{strategy_name}] Protection placement failed on {symbol}: {protection_exc}")
                                     try:
-                                        emergency_close_unprotected(symbol, direction, filled_size)
-                                        print(f"[{strategy_name}] Emergency close succeeded after protection exception.")
+                                        ok, ec, em = emergency_close_unprotected(symbol, direction, filled_size)
+                                        if ok:
+                                            print(f"[{strategy_name}] Emergency close succeeded after protection exception.")
+                                        elif ec == '51169':
+                                            print(f"[{strategy_name}] Emergency close: position already closed (51169).")
+                                        else:
+                                            print(f"[{strategy_name}] URGENT: emergency close failed: code={ec} {em}")
                                     except Exception as emergency_err:
                                         print(f"[{strategy_name}] URGENT: emergency close failed: {emergency_err}")
                                     continue
@@ -871,8 +875,13 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                         f"code={protection_code}, msg={protection_message}"
                                     )
                                     try:
-                                        emergency_close_unprotected(symbol, direction, filled_size)
-                                        print(f"[{strategy_name}] Emergency close succeeded after protection rejection.")
+                                        ok, ec, em = emergency_close_unprotected(symbol, direction, filled_size)
+                                        if ok:
+                                            print(f"[{strategy_name}] Emergency close succeeded after protection rejection.")
+                                        elif ec == '51169':
+                                            print(f"[{strategy_name}] Emergency close: position already closed (51169).")
+                                        else:
+                                            print(f"[{strategy_name}] URGENT: emergency close failed: code={ec} {em}")
                                     except Exception as emergency_err:
                                         print(f"[{strategy_name}] URGENT: emergency close failed: {emergency_err}")
                                     continue
@@ -925,12 +934,17 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                 print(f"Demo Execution Error: {ex}")
                                 if filled_size > 0 and not protection_confirmed:
                                     try:
-                                        emergency_close_unprotected(
+                                        ok, ec, em = emergency_close_unprotected(
                                             symbol,
                                             signal_obj['direction'],
                                             filled_size,
                                         )
-                                        print(f"[{strategy_name}] Emergency close succeeded after execution exception.")
+                                        if ok:
+                                            print(f"[{strategy_name}] Emergency close succeeded after execution exception.")
+                                        elif ec == '51169':
+                                            print(f"[{strategy_name}] Emergency close: position already closed (51169).")
+                                        else:
+                                            print(f"[{strategy_name}] URGENT: emergency close failed: code={ec} {em}")
                                     except Exception as emergency_err:
                                         print(f"[{strategy_name}] URGENT: emergency close failed: {emergency_err}")
                             finally:
@@ -1121,10 +1135,20 @@ def background_sync_loop():
                                 if close_size > 0:
                                     try:
                                         ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
-                                        emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
-                                        t['emergency_close_submitted'] = True
-                                        t['protection_status'] = 'emergency_close_submitted'
-                                        print(f"[URGENT] {t['symbol']} had no SL for {missing_checks} checks; emergency close submitted.")
+                                        ok, ec, em = emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
+                                        if ok:
+                                            t['emergency_close_submitted'] = True
+                                            t['protection_status'] = 'emergency_close_submitted'
+                                            print(f"[URGENT] {t['symbol']} had no SL for {missing_checks} checks; emergency close submitted.")
+                                        elif ec == '51169':
+                                            # Position already closed on OKX side — remove from active trades
+                                            print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
+                                            t['status'] = 'closed'
+                                            t['exit_reason'] = 'emergency_position_not_found'
+                                            t['emergency_close_submitted'] = True
+                                        else:
+                                            t['protection_error'] = f"missing SL; emergency close failed: code={ec} {em}"
+                                            print(f"[URGENT] {t['symbol']} emergency close failed: code={ec} {em}")
                                     except Exception as emergency_err:
                                         t['protection_error'] = f"missing SL; emergency close failed: {emergency_err}"
                                         print(f"[URGENT] {t['symbol']} emergency close failed: {emergency_err}")

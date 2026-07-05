@@ -131,11 +131,27 @@ def place_exact_fill_protection(symbol, direction, filled_size, plan, client_ord
     })
 
 def emergency_close_unprotected(symbol, direction, filled_size):
+    """Close a position in Net Mode. Returns (success, error_code, error_msg)."""
     close_side = 'sell' if direction == 'long' else 'buy'
-    return okx.create_order(symbol, 'market', close_side, filled_size, None, {
-        'tdMode': 'cross',
-        'reduceOnly': True,
-    })
+    try:
+        result = okx.create_order(symbol, 'market', close_side, filled_size, None, {
+            'tdMode': 'cross',
+            'posSide': 'net',       # Required for Net Mode on OKX
+            'reduceOnly': True,
+        })
+        info = (result or {}).get('info') or {}
+        data = info.get('data') or [{}]
+        s_code = str((data[0] if data else {}).get('sCode') or '0')
+        if s_code not in ['', '0']:
+            s_msg = (data[0] if data else {}).get('sMsg', '')
+            return False, s_code, s_msg
+        return True, '0', ''
+    except Exception as e:
+        err_str = str(e)
+        # 51169 = no positions in this direction (already closed)
+        if '51169' in err_str:
+            return False, '51169', 'Position already closed or does not exist'
+        raise
 
 def okx_order_failed(result):
     info = dict((result or {}).get('info') or {})
