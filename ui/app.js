@@ -654,7 +654,7 @@ function renderModeCards() {
         const perf = performanceData[name] || {};
         const opt = optimizerData[name] || {};
         const pnl = Number(stats.pnl || perf.total_pnl || 0);
-        const winRate = stats.win_rate == null ? '-' : pct(stats.win_rate * 100, 1);
+        const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
         const card = document.createElement('article');
         card.className = 'mode-card';
         card.innerHTML = `
@@ -1130,14 +1130,15 @@ function renderEngineHeartbeat() {
     container.innerHTML = engines.map(name => {
         const meta = ENGINE_META[name] || { icon: '•', desc: name, color: '#888' };
         const stats = sessionStrategyStats[name] || {};
-        const perf = sessionPerformanceData[name] || {};
+        const perf = performanceData[name] || {};
+        const opt = optimizerData[name] || {};
         const active = engineActive[name] || 0;
         const signals = engineSignals[name] || 0;
         const pnl = enginePnl[name] || 0;
-        const wr = stats.win_rate != null ? (stats.win_rate * 100).toFixed(0) + '%' : '--';
-        const conf = stats.confidence != null ? stats.confidence.toFixed(2) : '1.00';
-        const verdict = perf.verdict || 'learning';
-        const verdictColor = verdict === 'scale_up' ? '#22c55e' : verdict === 'keep' ? '#60a5fa' : verdict === 'pause' ? '#ef4444' : '#f59e0b';
+        const wr = perf.win_rate != null ? perf.win_rate + '%' : '--';
+        const conf = opt.capital_mult != null ? opt.capital_mult.toFixed(2) : (stats.confidence != null ? stats.confidence.toFixed(2) : '1.00');
+        const verdict = perf.tier || 'D (Training/Explore)';
+        const verdictColor = perf.state === 'exploit' ? '#22c55e' : perf.state === 'steady' ? '#60a5fa' : perf.state === 'pause' ? '#ef4444' : '#f59e0b';
 
         // Get detailed block reason from radarDict for this strategy
         const strategyRadar = radarData[name] || [];
@@ -1179,7 +1180,7 @@ function renderEngineHeartbeat() {
         }).join('');
 
         // Cumulative PnL from stats (Journal check)
-        const cumPnl = Number(stats.pnl || perf.total_pnl || 0);
+        const cumPnl = Number(perf.total_pnl || 0);
 
         // Scanning status
         const scanStatus = signals > 0
