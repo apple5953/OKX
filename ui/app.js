@@ -13,6 +13,7 @@ let accountData = {};
 let reportData = {};
 let currentStrategyFilter = 'All';
 let latestRegime = 'ranging';
+let currentStrategyVersion = 'v9';
 
 const START_EQUITY = 5000;
 const TARGET_EQUITY = 10000;
@@ -499,12 +500,13 @@ function refreshSessionMetrics() {
 
 function updateProgressCurve(equity) {
     const signedProgress = ((equity - START_EQUITY) / (TARGET_EQUITY - START_EQUITY)) * 100;
-    const progress = Math.max(0, Math.min(100, signedProgress));
+    const maxTargetProgress = Math.max(100, signedProgress);
+    const progressRatio = Math.max(0, signedProgress) / maxTargetProgress;
     const isDrawdown = signedProgress < 0;
     const x0 = 42;
     const y0 = 132;
-    const x = isDrawdown ? x0 : x0 + (556 * progress / 100);
-    const y = isDrawdown ? y0 + Math.min(30, Math.abs(signedProgress) * 1.5) : y0 - (94 * progress / 100);
+    const x = isDrawdown ? x0 : x0 + (556 * progressRatio);
+    const y = isDrawdown ? y0 + Math.min(30, Math.abs(signedProgress) * 1.5) : y0 - (94 * progressRatio);
     const x1 = x0 + (x - x0) * 0.25;
     const x2 = x0 + (x - x0) * 0.55;
     const x3 = x0 + (x - x0) * 0.78;
@@ -521,7 +523,7 @@ function updateProgressCurve(equity) {
     document.getElementById('progress-dot').setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
     document.getElementById('curve-label').textContent = isDrawdown
         ? `回撤 ${Math.abs(signedProgress).toFixed(1)}%`
-        : `目標進度 ${progress.toFixed(1)}%`;
+        : `目標進度 ${signedProgress.toFixed(1)}%`;
     document.getElementById('curve-label').setAttribute('x', Math.max(60, Math.min(520, x - 28)));
     document.getElementById('curve-label').setAttribute('y', isDrawdown ? 174 : 28);
 }
@@ -544,11 +546,18 @@ function updateOverview() {
     capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
     updateProgressCurve(strategyEquity);
 
+    const match = currentStrategyVersion.match(/v\d+/i);
+    const verTag = match ? match[0].toUpperCase() : 'V9';
+    const labelEl = document.getElementById('version-pnl-label');
+    if (labelEl) {
+        labelEl.textContent = `${verTag} 策略總損益`;
+    }
+
     const perfList = Object.values(sessionPerformanceData || {});
     const paused = perfList.filter((item) => item.verdict === 'pause').length;
     const active = currentTrades.filter((item) => item.status === 'active').length;
     document.getElementById('bot-verdict').textContent = capital.state === 'drawdown'
-        ? 'V7 策略回撤中（仍持續掃描）'
+        ? `${verTag} 策略回撤中（仍持續掃描）`
         : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
     document.getElementById('operator-summary').innerHTML = `
         <div><span>${active}</span><strong>\u7b46\u6301\u5009</strong></div>
@@ -1000,6 +1009,7 @@ async function fetchTrades() {
         const metaEl = document.getElementById('performance-metadata');
         if (metaEl) {
             const ver = data.strategy_version || '--';
+            currentStrategyVersion = ver;
             let dateStr = '無歷史交易';
             if (data.journal_start && data.journal_end) {
                 const formatTime = (ts) => {
