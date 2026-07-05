@@ -840,15 +840,14 @@ function renderStrategyInfo() {
     `;
 }
 
-function updateProgressCurve(equity, startEquity = START_EQUITY, targetEquity = TARGET_EQUITY) {
-    const progressSpan = Math.max(1, targetEquity - startEquity);
-    const signedProgress = ((equity - startEquity) / progressSpan) * 100;
-    const progress = Math.max(0, Math.min(100, signedProgress));
+function updateProgressCurve(pnlVal, signedProgress) {
+    const maxTargetProgress = Math.max(100, signedProgress);
+    const progressRatio = Math.max(0, signedProgress) / maxTargetProgress;
     const isDrawdown = signedProgress < 0;
     const x0 = 42;
     const y0 = 132;
-    const x = isDrawdown ? x0 : x0 + (556 * progress / 100);
-    const y = isDrawdown ? y0 + Math.min(30, Math.abs(signedProgress) * 1.5) : y0 - (94 * progress / 100);
+    const x = isDrawdown ? x0 : x0 + (556 * progressRatio);
+    const y = isDrawdown ? y0 + Math.min(30, Math.abs(signedProgress) * 1.5) : y0 - (94 * progressRatio);
     const x1 = x0 + (x - x0) * 0.25;
     const x2 = x0 + (x - x0) * 0.55;
     const x3 = x0 + (x - x0) * 0.78;
@@ -856,33 +855,29 @@ function updateProgressCurve(equity, startEquity = START_EQUITY, targetEquity = 
     const y2 = y0 - (y0 - y) * 0.45;
     const y3 = y0 - (y0 - y) * 0.78;
     const progressEl = document.getElementById('growth-progress');
-    const progressCurve = document.getElementById('progress-curve');
-    const progressDot = document.getElementById('progress-dot');
-    const curveLabel = document.getElementById('curve-label');
+    progressEl.textContent = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
+    progressEl.className = isDrawdown ? 'loss' : 'gain';
+    document.getElementById('progress-curve').setAttribute('points', `${x0},${y0} ${x1},${y1} ${x2},${y2} ${x3},${y3} ${x},${y}`);
+    document.getElementById('progress-curve').setAttribute('class', `chart-line${isDrawdown ? ' drawdown' : ''}`);
+    document.getElementById('progress-dot').setAttribute('cx', x);
+    document.getElementById('progress-dot').setAttribute('cy', y);
+    document.getElementById('progress-dot').setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
+    
+    const match = currentStrategyVersion.match(/v\d+/i);
+    const verTag = match ? match[0].toUpperCase() : 'V9';
+    const pnlText = `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)} USDT`;
+    const pctText = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
+
+    document.getElementById('curve-label').textContent = `${verTag} 淨損益: ${pnlText} (${pctText})`;
+    document.getElementById('curve-label').setAttribute('x', Math.max(60, Math.min(520, x - 28)));
+    document.getElementById('curve-label').setAttribute('y', isDrawdown ? 174 : 28);
+    
     const startLabel = document.getElementById('progress-start-label');
     const targetLabel = document.getElementById('progress-target-label');
     const titleLabel = document.getElementById('growth-title');
-    if (progressEl) {
-        progressEl.textContent = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(1)}%`;
-        progressEl.className = isDrawdown ? 'loss' : 'gain';
-    }
-    if (progressCurve) {
-        progressCurve.setAttribute('points', `${x0},${y0} ${x1},${y1} ${x2},${y2} ${x3},${y3} ${x},${y}`);
-        progressCurve.setAttribute('class', `chart-line${isDrawdown ? ' drawdown' : ''}`);
-    }
-    if (progressDot) {
-        progressDot.setAttribute('cx', x);
-        progressDot.setAttribute('cy', y);
-        progressDot.setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
-    }
-    if (curveLabel) {
-        curveLabel.textContent = isDrawdown ? `回撤 ${Math.abs(signedProgress).toFixed(1)}%` : `進度 ${progress.toFixed(1)}%`;
-        curveLabel.setAttribute('x', Math.max(60, Math.min(520, x - 28)));
-        curveLabel.setAttribute('y', isDrawdown ? 174 : 28);
-    }
-    if (startLabel) startLabel.textContent = `${Math.max(0, Math.round(startEquity))}U`;
-    if (targetLabel) targetLabel.textContent = `${Math.max(0, Math.round(targetEquity))}U`;
-    if (titleLabel) titleLabel.textContent = `${Math.max(0, Math.round(startEquity))}U → ${Math.max(0, Math.round(targetEquity))}U 本次啟動進度`;
+    if (startLabel) startLabel.textContent = `0 USDT`;
+    if (targetLabel) targetLabel.textContent = `+5000 USDT`;
+    if (titleLabel) titleLabel.textContent = `${verTag} 策略累積損益進度`;
 }
 
 function updateOverview() {
@@ -899,20 +894,40 @@ function updateOverview() {
     const availEl = document.getElementById('usdt-avail');
     if (totalEquityEl) totalEquityEl.textContent = money(equity);
     if (availEl) availEl.textContent = money(accountData.usdtAvail);
-    const capital = accountData.capital || {};
-    const sessionStartEquity = Number(capital.start ?? START_EQUITY);
-    const sessionTargetEquity = Number(capital.target ?? TARGET_EQUITY);
-    const strategyEquity = Number(capital.equity ?? equity);
-    const capitalChange = Number(capital.pnl_from_start ?? (strategyEquity - sessionStartEquity));
+
+    const strategyTotalPnl = Object.values(performanceData || {}).reduce((sum, p) => sum + Number(p.total_pnl || 0), 0);
+    const capitalChange = strategyTotalPnl;
     const capitalChangeEl = document.getElementById('capital-change');
     if (capitalChangeEl) {
         capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
         capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
     }
-    updateProgressCurve(strategyEquity, sessionStartEquity, sessionTargetEquity);
+
+    const targetProfitGoal = TARGET_EQUITY - START_EQUITY; // 5000
+    const signedProgress = (strategyTotalPnl / targetProfitGoal) * 100;
+    updateProgressCurve(strategyTotalPnl, signedProgress);
+
+    const match = currentStrategyVersion.match(/v\d+/i);
+    const verTag = match ? match[0].toUpperCase() : 'V9';
 
     const perfList = Object.values(sessionPerformanceData || {});
     const paused = perfList.filter((item) => item.verdict === 'pause').length;
+    const active = currentTrades.filter((item) => item.status === 'active').length;
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) {
+        verdictEl.textContent = (accountData.capital || {}).state === 'drawdown'
+            ? `${verTag} 策略回撤中（仍持續掃描）`
+            : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
+    }
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${active}</span><strong>筆持倉</strong></div>
+            <div><span>${paused}</span><strong>個模式目前屬於弱勢訓練</strong></div>
+            <div><span>${money(activePnl)}</span><strong>目前浮動損益</strong></div>
+        `;
+    }
+}st.filter((item) => item.verdict === 'pause').length;
     const active = currentTrades.filter((item) => item.status === 'active').length;
     const verdictEl = document.getElementById('bot-verdict');
     if (verdictEl) {
@@ -1236,50 +1251,4 @@ function renderEngineHeartbeat() {
     }).join('');
 }
 
-function updateOverview() {
-    const equity = Number(accountData.usdtEq || accountData.usdtAvail || 0);
-    const capital = accountData.capital || {};
-    const sessionStartEquity = Number(capital.start ?? START_EQUITY);
-    const sessionTargetEquity = Number(capital.target ?? TARGET_EQUITY);
-    const strategyEquity = Number(capital.equity ?? equity);
-    const sessionActivePnl = Number(reportData.session_active_pnl ?? 0);
-    const sessionActiveCount = Number(reportData.session_active_count ?? 0);
-    const sessionPotentialCount = Number(reportData.session_potential_count ?? 0);
-    const capitalChange = Number(capital.pnl_from_start ?? (strategyEquity - sessionStartEquity));
-
-    const pnlEl = document.getElementById('total-profit');
-    if (pnlEl) {
-        pnlEl.textContent = `${sessionActivePnl >= 0 ? '+' : ''}${money(sessionActivePnl)}`;
-        pnlEl.className = `value ${sessionActivePnl >= 0 ? 'gain' : 'loss'}`;
-    }
-
-    const totalEquityEl = document.getElementById('total-equity');
-    const availEl = document.getElementById('usdt-avail');
-    if (totalEquityEl) totalEquityEl.textContent = money(equity);
-    if (availEl) availEl.textContent = money(accountData.usdtAvail);
-
-    const capitalChangeEl = document.getElementById('capital-change');
-    if (capitalChangeEl) {
-        capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
-        capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
-    }
-
-    updateProgressCurve(strategyEquity, sessionStartEquity, sessionTargetEquity);
-
-    const paused = Object.values(performanceData || {}).filter((item) => item.verdict === 'pause').length;
-    const verdictEl = document.getElementById('bot-verdict');
-    if (verdictEl) {
-        verdictEl.textContent = capital.state === 'drawdown'
-            ? '本次啟動資金回撤'
-            : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
-    }
-
-    const summaryEl = document.getElementById('operator-summary');
-    if (summaryEl) {
-        summaryEl.innerHTML = `
-            <div><span>${sessionActiveCount}</span><strong>本次啟動持倉</strong></div>
-            <div><span>${sessionPotentialCount}</span><strong>本次啟動候選</strong></div>
-            <div><span>${money(sessionActivePnl)}</span><strong>本次啟動浮動損益</strong></div>
-        `;
-    }
-}
+// --- SECTION REMOVED TRIPLICATES ---
