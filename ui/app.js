@@ -995,6 +995,22 @@ async function fetchTrades() {
         performanceData = data.performance && typeof data.performance === 'object' ? data.performance : performanceData;
         optimizerData = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : optimizerData;
         reportData = data.report && typeof data.report === 'object' ? data.report : reportData;
+
+        // Update Performance / Rehab Learning metadata (Version and Date range)
+        const metaEl = document.getElementById('performance-metadata');
+        if (metaEl) {
+            const ver = data.strategy_version || '--';
+            let dateStr = '無歷史交易';
+            if (data.journal_start && data.journal_end) {
+                const formatTime = (ts) => {
+                    const d = new Date(ts);
+                    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                };
+                dateStr = `${formatTime(data.journal_start)} 至 ${formatTime(data.journal_end)}`;
+            }
+            metaEl.textContent = `機器人版本: ${ver} | 數據統計區間: ${dateStr}`;
+        }
+
         refreshSessionMetrics();
         updateOverview();
         renderBotReport();

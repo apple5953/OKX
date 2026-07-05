@@ -45,6 +45,10 @@ def api_trades():
     )
     visible_trades = [t for t in visible_trades if t.get('symbol')]
                     
+    journal_trades = [t for t in state.trade_journal if t.get('closed_at')]
+    first_trade_time = min(t['closed_at'] for t in journal_trades) if journal_trades else None
+    last_trade_time = max(t['closed_at'] for t in journal_trades) if journal_trades else None
+
     try:
         return jsonify(json_safe({
             'trades': visible_trades,
@@ -59,6 +63,8 @@ def api_trades():
             'ml_logs': state.ml_evolution_logs,
             'report': build_bot_report(visible_trades, live_positions=live_positions),
             'strategy_version': config.STRATEGY_VERSION,
+            'journal_start': first_trade_time,
+            'journal_end': last_trade_time,
         }))
     except Exception as e:
         import traceback
