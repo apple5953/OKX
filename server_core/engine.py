@@ -1054,7 +1054,7 @@ def background_sync_loop():
 
                 for t in state.active_trades:
                     if t['status'] == 'active':
-                        expected_inst_id = t.get('instId') or (t['symbol'].replace('USDT', '') + "-USDT-SWAP")
+                        expected_inst_id = t.get('instId') or (normalize_symbol_key(t['symbol']).replace('USDT', '') + "-USDT-SWAP")
                         expected_side = 'sell' if t['direction'] == 'long' else 'buy'
                         tracked_algo_ids = set(str(x) for x in (t.get('protection_order_ids') or []) if x)
                         if t.get('protection_order_id'):
@@ -1096,7 +1096,7 @@ def background_sync_loop():
                                     close_size = as_float(t.get('filled_contracts'))
                                 if close_size > 0:
                                     try:
-                                        ccxt_sym = f"{t['symbol'].replace('USDT', '')}/USDT:USDT"
+                                        ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
                                         emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
                                         t['emergency_close_submitted'] = True
                                         t['protection_status'] = 'emergency_close_submitted'
@@ -1107,7 +1107,7 @@ def background_sync_loop():
                         
                         # Fix: Fetch real-time price inside background loop to avoid stale t['current'] values
                         try:
-                            ccxt_sym = f"{t['symbol'].replace('USDT', '')}/USDT:USDT"
+                            ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
                             ticker = okx.fetch_ticker(ccxt_sym)
                             t['current'] = float(ticker.get('last', t['current']))
                         except Exception as p_err:
@@ -1234,7 +1234,7 @@ def background_sync_loop():
                                             continue
                                         for a in protective_algos:
                                             try:
-                                                ccxt_sym = f"{t['symbol'].replace('USDT', '')}/USDT:USDT"
+                                                ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
                                                 formatted_sl = okx.price_to_precision(ccxt_sym, new_sl)
                                                 
                                                 # Avoid redundant API calls if string format matches existing OKX order
