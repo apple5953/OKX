@@ -539,11 +539,14 @@ def fetch_open_positions_snapshot(force=False):
             if not position_is_open(row):
                 continue
             inst_id = str(row.get('instId') or '')
-            side = normalize_position_side(
-                row.get('posSide')
-                or row.get('side')
-                or ('long' if as_float(row.get('pos') or row.get('sz')) >= 0 else 'short')
-            )
+            pos_qty = as_float(row.get('pos') or row.get('sz'))
+            raw_side = row.get('posSide') or row.get('side')
+            if raw_side == 'net':
+                side = 'long' if pos_qty >= 0 else 'short'
+            else:
+                side = normalize_position_side(
+                    raw_side or ('long' if pos_qty >= 0 else 'short')
+                )
             normalized = {
                 'id': row.get('posId') or row.get('id') or inst_id,
                 'posId': row.get('posId') or row.get('id') or inst_id,
