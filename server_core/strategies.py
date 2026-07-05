@@ -87,6 +87,7 @@ def strategy_performance(strategy_name, limit=120):
             'strategy': strategy_name, 'total_trades': 0, 'win_rate': 0.0,
             'profit_factor': 0.0, 'expectancy': 0.0, 'total_pnl': 0.0,
             'max_drawdown': 0.0, 'tier': 'D (Training/Explore)', 'state': 'explore',
+            'verdict': 'learning',
             'net_wins': 0, 'funding_excluded': True, 'win_count': 0, 'loss_count': 0
         }
     
@@ -131,11 +132,16 @@ def strategy_performance(strategy_name, limit=120):
         tier = 'D (Training/Explore)'
         state_verdict = 'explore'
         
+    # Map state to UI verdict
+    verdict_map = {'exploit': 'scale_up', 'steady': 'keep', 'recover': 'reduce', 'explore': 'learning'}
+    verdict = verdict_map.get(state_verdict, 'learning')
+
     return {
         'strategy': strategy_name, 'total_trades': total_trades, 'win_rate': round(win_rate, 2),
         'profit_factor': round(profit_factor, 3), 'expectancy': round(expectancy, 4),
         'total_pnl': round(total_pnl, 4), 'max_drawdown': round(max_dd, 4),
-        'tier': tier, 'state': state_verdict, 'net_wins': win_count - loss_count,
+        'tier': tier, 'state': state_verdict, 'verdict': verdict,
+        'net_wins': win_count - loss_count,
         'funding_excluded': True, 'win_count': win_count, 'loss_count': loss_count
     }
 
