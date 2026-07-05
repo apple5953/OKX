@@ -498,8 +498,7 @@ function refreshSessionMetrics() {
     return { sessionRows };
 }
 
-function updateProgressCurve(equity) {
-    const signedProgress = ((equity - START_EQUITY) / (TARGET_EQUITY - START_EQUITY)) * 100;
+function updateProgressCurve(pnlVal, signedProgress) {
     const maxTargetProgress = Math.max(100, signedProgress);
     const progressRatio = Math.max(0, signedProgress) / maxTargetProgress;
     const isDrawdown = signedProgress < 0;
@@ -514,16 +513,20 @@ function updateProgressCurve(equity) {
     const y2 = y0 - (y0 - y) * 0.45;
     const y3 = y0 - (y0 - y) * 0.78;
     const progressEl = document.getElementById('growth-progress');
-    progressEl.textContent = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(1)}%`;
+    progressEl.textContent = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
     progressEl.className = isDrawdown ? 'loss' : 'gain';
     document.getElementById('progress-curve').setAttribute('points', `${x0},${y0} ${x1},${y1} ${x2},${y2} ${x3},${y3} ${x},${y}`);
     document.getElementById('progress-curve').setAttribute('class', `chart-line${isDrawdown ? ' drawdown' : ''}`);
     document.getElementById('progress-dot').setAttribute('cx', x);
     document.getElementById('progress-dot').setAttribute('cy', y);
     document.getElementById('progress-dot').setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
-    document.getElementById('curve-label').textContent = isDrawdown
-        ? `回撤 ${Math.abs(signedProgress).toFixed(1)}%`
-        : `目標進度 ${signedProgress.toFixed(1)}%`;
+    
+    const match = currentStrategyVersion.match(/v\d+/i);
+    const verTag = match ? match[0].toUpperCase() : 'V9';
+    const pnlText = `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)} USDT`;
+    const pctText = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
+
+    document.getElementById('curve-label').textContent = `${verTag} 淨損益: ${pnlText} (${pctText})`;
     document.getElementById('curve-label').setAttribute('x', Math.max(60, Math.min(520, x - 28)));
     document.getElementById('curve-label').setAttribute('y', isDrawdown ? 174 : 28);
 }
@@ -538,29 +541,28 @@ function updateOverview() {
     pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
     document.getElementById('total-equity').textContent = money(equity);
     document.getElementById('usdt-avail').textContent = money(accountData.usdtAvail);
-    const capital = accountData.capital || {};
-    const strategyEquity = Number(capital.equity ?? START_EQUITY);
-    const capitalChange = Number(capital.pnl_from_start ?? (equity - START_EQUITY));
+    
+    const strategyTotalPnl = Object.values(performanceData || {}).reduce((sum, p) => sum + Number(p.total_pnl || 0), 0);
+    const capitalChange = strategyTotalPnl;
     const capitalChangeEl = document.getElementById('capital-change');
     capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
     capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
-    updateProgressCurve(strategyEquity);
+    
+    const targetProfitGoal = TARGET_EQUITY - START_EQUITY; // 5000
+    const signedProgress = (strategyTotalPnl / targetProfitGoal) * 100;
+    updateProgressCurve(strategyTotalPnl, signedProgress);
 
     const match = currentStrategyVersion.match(/v\d+/i);
     const verTag = match ? match[0].toUpperCase() : 'V9';
-    const labelEl = document.getElementById('version-pnl-label');
-    if (labelEl) {
-        labelEl.textContent = `${verTag} 策略總損益`;
-    }
 
     const perfList = Object.values(sessionPerformanceData || {});
     const paused = perfList.filter((item) => item.verdict === 'pause').length;
     const active = currentTrades.filter((item) => item.status === 'active').length;
-    document.getElementById('bot-verdict').textContent = capital.state === 'drawdown'
+    document.getElementById('bot-verdict').textContent = (accountData.capital || {}).state === 'drawdown'
         ? `${verTag} 策略回撤中（仍持續掃描）`
         : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
     document.getElementById('operator-summary').innerHTML = `
-        <div><span>${active}</span><strong>\u7b46\u6301\u5009</strong></div>
+        <div><span>${active}</span><strong>筆持倉</strong></div>
         <div><span>${paused}</span><strong>個模式目前屬於弱勢訓練</strong></div>
         <div><span>${money(activePnl)}</span><strong>\u76ee\u524d\u6d6e\u52d5\u640d\u76ca</strong></div>
     `;
