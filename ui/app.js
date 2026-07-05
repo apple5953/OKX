@@ -927,22 +927,6 @@ function updateOverview() {
             <div><span>${money(activePnl)}</span><strong>目前浮動損益</strong></div>
         `;
     }
-}st.filter((item) => item.verdict === 'pause').length;
-    const active = currentTrades.filter((item) => item.status === 'active').length;
-    const verdictEl = document.getElementById('bot-verdict');
-    if (verdictEl) {
-        verdictEl.textContent = capital.state === 'drawdown'
-            ? '本次啟動資金回撤'
-            : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
-    }
-    const summaryEl = document.getElementById('operator-summary');
-    if (summaryEl) {
-        summaryEl.innerHTML = `
-            <div><span>${active}</span><strong>筆持倉</strong></div>
-            <div><span>${paused}</span><strong>個模式目前屬於弱勢訓練</strong></div>
-            <div><span>${money(activePnl)}</span><strong>目前浮動損益</strong></div>
-        `;
-    }
 }
 
 function renderTrades() {
