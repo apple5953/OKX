@@ -986,7 +986,7 @@ def background_sync_loop():
                                 ),
                                 None,
                             )
-                            if actual_close is None and t.get('strategy_version') != config.STRATEGY_VERSION:
+                            if actual_close is None:
                                 actual_close = next(
                                     (h for h in cycle_history if str(h.get('posId') or '') == pos_id),
                                     None,
@@ -1025,9 +1025,12 @@ def background_sync_loop():
                     write_json_atomic(config.JOURNAL_FILE, state.trade_journal)
                             
                 for pos in positions:
-                    sym = pos['symbol'].replace('/', '').replace(':USDT', '')
+                    # Normalize symbol formats (e.g. LAB-USDT-SWAP -> LABUSDT) to match active strategy trades
+                    def get_base_ccy(s):
+                        return s.replace('/', '').replace(':USDT', '').replace('-USDT', '').replace('USDT', '').replace('-SWAP', '').upper()
+                    sym = get_base_ccy(pos['symbol']) + "USDT"
                     direction = pos.get('side', 'long')
-                    exists = any(t['symbol'] == sym and t['direction'] == direction and t['status'] == 'active' for t in state.active_trades)
+                    exists = any(get_base_ccy(t['symbol']) == get_base_ccy(sym) and t['direction'] == direction and t['status'] == 'active' for t in state.active_trades)
                     if not exists:
                         state.active_trades.append({
                             "id": state.trade_id_counter, "posId": pos.get('id'), "instId": pos.get('info', {}).get('instId', ''),
