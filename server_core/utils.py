@@ -12,8 +12,14 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 def acquire_instance_guard(port=5017):
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Allow immediate rebind after crash (avoids "Address already in use" on restart)
+    guard.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-        guard.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        # Windows-specific: still check for truly exclusive reuse
+        try:
+            guard.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            pass
     guard.bind(('127.0.0.1', port))
     guard.listen(1)
     state.instance_guard_socket = guard
@@ -35,6 +41,22 @@ def write_json_atomic(path, data):
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, default=default_json)
     os.replace(tmp_path, path)
+
+def load_json_list_candidates(paths, label):
+    """Load the first valid JSON list from a set of candidate paths."""
+    last_error = None
+    for path in paths:
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            data = repair_truncated_json_list(path)
+            if isinstance(data, list):
+                return data, path
+        except Exception as e:
+            last_error = e
+    if last_error:
+        print(f"Failed to load {label} from candidates: {last_error}")
+    return [], None
 
 def repair_truncated_json_list(path):
     raw = open(path, 'r', encoding='utf-8').read()
@@ -116,9 +138,13 @@ def timestamp_ms(value):
 def trade_open_timestamp_ms(trade):
     return timestamp_ms(trade.get('opened_at') or trade.get('open_timestamp'))
 
+def history_pos_id(record):
+    info = record.get('info') or {}
+    return str(info.get('posId') or record.get('posId') or record.get('id') or '')
+
 def history_event_key(record):
     info = record.get('info') or {}
-    pos_id = str(record.get('posId') or record.get('id') or info.get('posId') or '')
+    pos_id = history_pos_id(record)
     close_ms = timestamp_ms(
         record.get('lastUpdateTimestamp') or record.get('timestamp')
         or info.get('uTime') or info.get('cTime')
@@ -127,7 +153,7 @@ def history_event_key(record):
 
 def lifecycle_trade_for_history(record):
     info = record.get('info') or {}
-    pos_id = str(record.get('id') or record.get('posId') or info.get('posId') or '')
+    pos_id = history_pos_id(record)
     opened_ms = timestamp_ms(info.get('cTime') or record.get('datetime') or record.get('timestamp'))
     inst_id = str(info.get('instId') or record.get('instId') or '')
     direction = str(info.get('direction') or record.get('side') or '').lower()
@@ -146,10 +172,30 @@ def lifecycle_trade_for_history(record):
             continue
         distance = abs(trade_open_ms - opened_ms)
         if distance <= config.LIFECYCLE_OPEN_TOLERANCE_MS:
-            candidates.append((distance, trade_open_ms, trade))
+            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
+            candidates.append((manual_rank, distance, trade_open_ms, trade))
+    if not candidates and pos_id:
+        # Some OKX history payloads expose a distinct record id while the
+        # lifecycle match lives under info.posId. If the timestamp tolerance
+        # misses, fall back to a strict posId/instId/direction match so the
+        # strategy identity is not lost and later normalized to Manual.
+        for trade in state.trade_journal + state.active_trades:
+            trade_pos_id = str(trade.get('posId') or '')
+            if trade_pos_id != pos_id:
+                continue
+            trade_inst = str(trade.get('instId') or '')
+            trade_direction = str(trade.get('direction') or '').lower()
+            if inst_id and trade_inst and inst_id != trade_inst:
+                continue
+            if direction and trade_direction and direction != trade_direction:
+                continue
+            trade_open_ms = trade_open_timestamp_ms(trade)
+            distance = abs(trade_open_ms - opened_ms) if trade_open_ms and opened_ms else 0
+            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
+            candidates.append((manual_rank, distance, trade_open_ms, trade))
     if not candidates:
         return None
-    return min(candidates, key=lambda row: (row[0], -row[1]))[2]
+    return min(candidates, key=lambda row: (row[0], row[1], -row[2]))[3]
 
 def assess_accounting_record(record, lifecycle):
     """Keep suspicious OKX history visible, but out of learning and sizing."""

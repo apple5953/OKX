@@ -1,14 +1,27 @@
+import os
 import sys
 import time
 import threading
+from pathlib import Path
 from server_core import config, state, utils, okx_client, strategies, execution, engine, web_server
 
 # Load existing state
-state.active_trades = utils.load_json_list(config.TRADE_FILE, 'active trades')
+trade_candidates = [config.TRADE_FILE]
+if getattr(config, 'LEGACY_TRADE_FILE', None):
+    trade_candidates.append(config.LEGACY_TRADE_FILE)
+state.active_trades, loaded_trade_path = utils.load_json_list_candidates(trade_candidates, 'active trades')
+if loaded_trade_path and loaded_trade_path != config.TRADE_FILE:
+    try:
+        utils.write_json_atomic(config.TRADE_FILE, state.active_trades)
+    except Exception as e:
+        print(f"Failed to migrate active trades from {loaded_trade_path} to {config.TRADE_FILE}: {e}")
 
 # Merge all available node journals for aggregate UI metrics
 import glob
-all_journals = glob.glob('journal_*.json')
+all_journals = glob.glob(str(Path(config.PROJECT_DIR) / 'journal_*.json'))
+legacy_journal = getattr(config, 'LEGACY_JOURNAL_FILE', None)
+if legacy_journal and os.path.exists(legacy_journal) and legacy_journal not in all_journals:
+    all_journals.append(legacy_journal)
 state.trade_journal = []
 for j_file in all_journals:
     try:
@@ -109,6 +122,22 @@ if __name__ == '__main__':
     
     print("Server running on http://127.0.0.1:5000")
     print("Open your browser and navigate to the link above to view the Dashboard.")
-    web_server.app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+    # Catch all unhandled exceptions in any thread so crashes are visible in log
+    import traceback as _tb
+    _original_excepthook = sys.excepthook
+    def _global_excepthook(exc_type, exc_value, exc_tb):
+        print("[CRASH] Unhandled exception in main thread:")
+        _tb.print_exception(exc_type, exc_value, exc_tb)
+        _original_excepthook(exc_type, exc_value, exc_tb)
+    sys.excepthook = _global_excepthook
+
+    try:
+        web_server.app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    except Exception as flask_err:
+        print(f"[CRASH] Flask app.run() crashed: {flask_err}")
+        import traceback as _tb2
+        _tb2.print_exc()
+        sys.exit(1)
 else:
     sys.modules[__name__] = ServerModuleWrapper(sys.modules[__name__])
