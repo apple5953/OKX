@@ -3,7 +3,7 @@
     "last_evaluated_trade_count":  0,
     "completed_cycles":  0,
     "consecutive_positive_cycles":  0,
-    "last_checked_at":  "2026-07-05T14:22:06+08:00",
+    "last_checked_at":  "2026-07-05T17:26:15+08:00",
     "mode":  "monitoring_only",
-    "notes":  "Monitoring only. 2026-07-05T14:22:06+08:00 check shows `/api/report` with 3 live positions (THETAUSDT, FLOKIUSDT, BLUAIUSDT), all still active; THETAUSDT/FLOKIUSDT remain `protection_status=unconfirmed`; `active_trades.json` remains non-authoritative relative to `/api/report`; repeated market fetch + conflict-check read errors continue. Active positions remain live, so no restart or parameter change was made."
+    "notes":  "Monitoring only. 2026-07-05T17:26:15+08:00 check shows `/api/report` still returning live positions (20 symbols visible in the live list); protection gaps remain on multiple active positions, including failed/unconfirmed SL state; no restart or parameter change was made."
 }
