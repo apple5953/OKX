@@ -39,7 +39,9 @@ const strategyNames = {
     Contrarian: '\u6975\u7aef\u53cd\u8f49',
     SqueezeHunter: '\u64e0\u58d3\u7206\u767c',
     Manual: '\u624b\u52d5/\u672a\u540c\u6b65',
-    Recovered: '\u6062\u5fa9\u5009\u4f4d'
+    Recovered: '\u6062\u5fa9\u5009\u4f4d',
+    Bot: '\u6a5f\u5668\u4eba/\u672a\u5206\u985e',
+    Mixed: '\u591a\u7b56\u7565\u6df7\u5408',
 };
 
 const roleText = {

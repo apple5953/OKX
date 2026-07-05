@@ -198,14 +198,14 @@ def overlay_live_position_metadata(live_pos, tracked_trade=None):
             record['trade_source'] = tracked_trade.get('source')
     else:
         record.update({
-            'strategy': 'Manual',
-            'pattern': 'Manual / Unsynced',
+            'strategy': 'Bot',
+            'pattern': '機器人 / 未分類',
             'trailing_stage': 'waiting',
             'runner_policy': None,
             'protection_status': 'unconfirmed',
             'protection_error': None,
         })
-        record.setdefault('entry_reason', 'OKX live position without matching tracked lifecycle')
+        record.setdefault('entry_reason', 'OKX live position, no journal record found for this symbol')
     record['status'] = 'active'
     return record
 
@@ -217,6 +217,17 @@ def build_live_trade_snapshot(tracked_records=None, live_positions=None, include
         for t in tracked_records
         if t.get('status') == 'active'
     }
+
+    # Build fallback: instId -> most recent journal strategy (from any closed rows)
+    journal_strategy_map = {}
+    for row in (state.trade_journal or []):
+        strat = row.get('strategy')
+        if not strat or strat == 'Manual':
+            continue
+        inst = row.get('instId') or row.get('symbol') or ''
+        if inst:
+            journal_strategy_map[inst] = strat  # last-write wins (sorted by file order)
+
     merged = []
     for pos in live_positions:
         key = live_position_key(pos)
@@ -224,10 +235,23 @@ def build_live_trade_snapshot(tracked_records=None, live_positions=None, include
         if tracked:
             merged.append(overlay_live_position_metadata(pos, tracked))
         else:
-            merged.append(overlay_live_position_metadata(pos, None))
+            # Fallback: try to recover strategy from journal by instId
+            inst_id = pos.get('instId') or (pos.get('info') or {}).get('instId') or ''
+            fallback_strategy = journal_strategy_map.get(inst_id)
+            if fallback_strategy:
+                fake_tracked = {
+                    'strategy': fallback_strategy,
+                    'pattern': f'{fallback_strategy} / 歷史記錄恢復',
+                    'trailing_stage': 'waiting',
+                    'sync_status': 'journal_recovered',
+                }
+                merged.append(overlay_live_position_metadata(pos, fake_tracked))
+            else:
+                merged.append(overlay_live_position_metadata(pos, None))
     if include_potentials:
         merged.extend([dict(t) for t in state.potential_signals if t.get('symbol') and t.get('status') != 'active'])
     return merged
+
 
 def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, target_rr):
     
