@@ -650,9 +650,9 @@ function renderModeCards() {
     const container = document.getElementById('mode-cards');
     container.innerHTML = '';
     Object.entries(profiles).forEach(([name, profile]) => {
-        const stats = sessionStrategyStats[name] || {};
-        const perf = sessionPerformanceData[name] || {};
-        const opt = sessionOptimizerData[name] || {};
+        const stats = strategyStats[name] || {};
+        const perf = performanceData[name] || {};
+        const opt = optimizerData[name] || {};
         const pnl = Number(stats.pnl || perf.total_pnl || 0);
         const winRate = stats.win_rate == null ? '-' : pct(stats.win_rate * 100, 1);
         const card = document.createElement('article');
@@ -685,11 +685,11 @@ function verdictBadge(verdict) {
 function renderPerformance() {
     const tbody = document.getElementById('performance-body');
     tbody.innerHTML = '';
-    Object.entries(sessionPerformanceData || {}).forEach(([name, perf]) => {
+    Object.entries(performanceData || {}).forEach(([name, perf]) => {
         if (currentStrategyFilter !== 'All' && name !== currentStrategyFilter) return;
         const pf = Number(perf.profit_factor || 0);
         const exp = Number(perf.expectancy || 0);
-        const opt = sessionOptimizerData[name] || {};
+        const opt = optimizerData[name] || {};
         const stateLabel = optimizerLabel(opt);
         const tunedAtr = perf.tuned_sl_atr ? `ATR 止損系數: ${perf.tuned_sl_atr}` : '';
         const confidenceText = perf.confidence ? `AI 信心權重: ${perf.confidence}x` : '';
@@ -818,8 +818,8 @@ function renderStrategyInfo() {
         return;
     }
     const profile = profiles[currentStrategyFilter] || {};
-    const perf = sessionPerformanceData[currentStrategyFilter] || {};
-    const opt = sessionOptimizerData[currentStrategyFilter] || {};
+    const perf = performanceData[currentStrategyFilter] || {};
+    const opt = optimizerData[currentStrategyFilter] || {};
     box.hidden = false;
     box.innerHTML = `
         <strong>${strategyLabel(currentStrategyFilter)}</strong>
@@ -1237,7 +1237,7 @@ function updateOverview() {
 
     updateProgressCurve(strategyEquity, sessionStartEquity, sessionTargetEquity);
 
-    const paused = Object.values(sessionPerformanceData || {}).filter((item) => item.verdict === 'pause').length;
+    const paused = Object.values(performanceData || {}).filter((item) => item.verdict === 'pause').length;
     const verdictEl = document.getElementById('bot-verdict');
     if (verdictEl) {
         verdictEl.textContent = capital.state === 'drawdown'
