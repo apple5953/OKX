@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>&#x8AE7;&#x6CE2;&#x76C8;&#x5229;&#x6A5F;&#x5668;&#x4EBA;</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="style.css?v=7">
+    <style>
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background-color: #60a5fa;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7);
+            animation: pulse-ml 1.8s infinite;
+        }
+        @keyframes pulse-ml {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 5px rgba(96, 165, 250, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container growth-shell">
+        <header class="topbar">
+            <div>
+                <h1>&#x8AE7;&#x6CE2;&#x76C8;&#x5229;&#x6A5F;&#x5668;&#x4EBA;</h1>
+                <p>&#x672C;&#x6B21;&#x555F;&#x52D5;&#x5F8C;&#x91CD;&#x65B0;&#x7D71;&#x8A08;&#xFF0C;&#x5165;&#x91D1;&#x8207;&#x7B56;&#x7565;&#x640D;&#x76CA;&#x5206;&#x958B;&#x8A08;&#x7B97;&#x3002;</p>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <div class="live-chip" style="background: rgba(96,165,250,0.15); border: 1px solid rgba(96,165,250,0.3); color: #60a5fa;" id="regime-wrapper">
+                    <span id="regime-text">大盤分析中...</span>
+                </div>
+                <div class="live-chip">
+                    <span class="pulse"></span>
+                    <span>DEMO 執行中</span>
+                </div>
+            </div>
+        </header>
+
+        <section class="hero-grid">
+            <div class="capital-panel">
+                <div class="section-title">
+                    <span id="growth-title">本次啟動進度</span>
+                    <strong id="growth-progress">0%</strong>
+                </div>
+                <div class="capital-values">
+                    <div>
+                        <span>USDT &#x6B0A;&#x76CA;</span>
+                        <strong id="total-equity">$0.00</strong>
+                    </div>
+                    <div>
+                        <span>&#x53EF;&#x7528; USDT</span>
+                        <strong id="usdt-avail">$0.00</strong>
+                    </div>
+                    <div>
+                        <span>&#x672A;&#x5BE6;&#x73FE;&#x640D;&#x76CA;</span>
+                        <strong id="total-profit">+$0.00</strong>
+                    </div>
+                    <div>
+                        <span>V7 &#x7B56;&#x7565;&#x7E3D;&#x640D;&#x76CA;</span>
+                        <strong id="capital-change">$0.00</strong>
+                    </div>
+                </div>
+                <svg class="progress-chart" viewBox="0 0 640 180" role="img" aria-label="growth progress curve">
+                    <defs>
+                        <linearGradient id="curveFill" x1="0" y1="0" x2="1" y2="0">
+                            <stop offset="0%" stop-color="#60a5fa"/>
+                            <stop offset="100%" stop-color="#22c55e"/>
+                        </linearGradient>
+                    </defs>
+                    <line x1="42" y1="132" x2="598" y2="132" class="chart-axis"/>
+                    <line x1="42" y1="38" x2="42" y2="132" class="chart-axis"/>
+                    <polyline id="progress-curve" points="42,132 180,132 320,132 460,132 598,132" class="chart-line"/>
+                    <circle id="progress-dot" cx="42" cy="132" r="7" class="chart-dot"/>
+                    <text id="progress-start-label" x="42" y="158">5000U</text>
+                    <text id="progress-target-label" x="530" y="158">10000U</text>
+                    <text id="curve-label" x="300" y="28">0%</text>
+                </svg>
+            </div>
+
+            <div class="operator-panel">
+                <div class="section-title">
+                    <span>&#x6A5F;&#x5668;&#x4EBA;&#x72C0;&#x614B;</span>
+                    <strong id="bot-verdict">&#x89C0;&#x5BDF;&#x4E2D;</strong>
+                </div>
+                <div id="operator-summary" class="summary-list"></div>
+            </div>
+        </section>
+
+        <!-- Engine Heartbeat Panel -->
+        <section class="engine-panel">
+            <div class="panel-head">
+                <h2>&#x5F15;&#x64CE;&#x5373;&#x6642;&#x72C0;&#x614B;</h2>
+                <span class="hint">&#x6BCF; 5 &#x79D2;&#x66F4;&#x65B0;&#xFF0C;&#x986F;&#x793A;&#x6BCF;&#x500B;&#x5F15;&#x64CE;&#x76EE;&#x524D;&#x5728;&#x505A;&#x4EC0;&#x9EBC;</span>
+            </div>
+            <div id="engine-heartbeat" class="engine-grid"></div>
+        </section>
+
+        <section class="mode-panel">
+            <div class="panel-head">
+                <h2>&#x6A5F;&#x5668;&#x4EBA;&#x5373;&#x6642;&#x5831;&#x544A;</h2>
+                <span class="hint">&#x6BCF; 5 &#x79D2;&#x81EA;&#x52D5;&#x66F4;&#x65B0;&#xFF0C;&#x4E00;&#x773C;&#x770B;&#x61C2;&#x73FE;&#x5728;&#x6709;&#x6C92;&#x6709;&#x6301;&#x5009;&#x3001;&#x54EA;&#x500B;&#x6A21;&#x5F0F;&#x5728;&#x8CA0;&#x8CAC;&#x3001;&#x662F;&#x5426;&#x5DF2;&#x9396;&#x5229;&#x3002;</span>
+            </div>
+            <div id="bot-report" class="bot-report"></div>
+        </section>
+
+        <section class="mode-panel">
+            <div class="panel-head">
+                <h2>&#x6A21;&#x5F0F;&#x63A7;&#x5236;&#x53F0;</h2>
+                <div class="strategy-tabs">
+                    <button class="strat-btn active" data-strat="All">&#x5168;&#x90E8;</button>
+                    <button class="strat-btn" data-strat="MacroSniper">&#x8DA8;&#x52E2;&#x72D9;&#x64CA;</button>
+                    <button class="strat-btn" data-strat="MeanReversion">&#x5747;&#x503C;&#x4FEE;&#x5FA9;</button>
+                    <button class="strat-btn" data-strat="Contrarian">&#x6975;&#x7AEF;&#x53CD;&#x8F49;</button>
+                    <button class="strat-btn" data-strat="SqueezeHunter">&#x64E0;&#x58D3;&#x7206;&#x767C;</button>
+                </div>
+            </div>
+            <div id="strategy-info" class="focus-box" hidden></div>
+            <div id="mode-cards" class="mode-grid"></div>
+        </section>
+
+        <section class="data-panel">
+            <div class="panel-head">
+                <h2>&#x76C8;&#x5229;&#x9A57;&#x8B49; / &#x5FA9;&#x5065;&#x5B78;&#x7FD2;</h2>
+                <span class="hint">&#x5F31;&#x52E2;&#x6A21;&#x5F0F;&#x7E7C;&#x7E8C;&#x6383;&#x63CF;&#x8207;&#x6536;&#x6A23;&#x672C;&#xFF0C;&#x4EE5; 60U &#x70BA;&#x57FA;&#x6E96;&#x4FDD;&#x8B49;&#x91D1;&#xFF0C;&#x7E3E;&#x6548;&#x6539;&#x5584;&#x5F8C;&#x624D;&#x81EA;&#x52D5;&#x653E;&#x5927;</span>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>&#x6A21;&#x5F0F;</th>
+                            <th>&#x6A23;&#x672C; / &#x52DD;&#x7387;</th>
+                            <th>PF</th>
+                            <th>&#x5E73;&#x5747;&#x8D0F; / &#x8F38;</th>
+                            <th>&#x671F;&#x671B;&#x503C;</th>
+                            <th>&#x6700;&#x5927;&#x9023;&#x8667;</th>
+                            <th>&#x6700;&#x5927;&#x8667;&#x640D;</th>
+                            <th>&#x5B78;&#x7FD2;&#x72C0;&#x614B;</th>
+                        </tr>
+                    </thead>
+                    <tbody id="performance-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- AI ML Evolutionary Cabin -->
+        <section class="data-panel" style="margin-top: 20px; background: rgba(30, 30, 45, 0.4); border: 1px solid rgba(255,255,255,0.08);">
+            <div class="panel-head">
+                <h2 style="color: #60a5fa; display: flex; align-items: center; gap: 8px;">
+                    <span class="pulse-dot"></span> 🤖 AI 智能學習進化日誌 (ML Evolutionary Journal)
+                </h2>
+                <span style="font-size: 11px; color: #a1a1aa;">自動監控平倉數據 • 動態調優獲利參數</span>
+            </div>
+            <div style="padding: 15px; max-height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.6; color: #e2e8f0; background: #0b0c16; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);" id="ml-log-console">
+                <div style="color: #60a5fa;">[系統啟動] ML 引擎自適應優化模組已加載。正在等待平倉數據生成訓練反饋...</div>
+            </div>
+        </section>
+
+        <section class="data-panel">
+            <div class="panel-head">
+                <h2>&#x76EE;&#x524D;&#x5009;&#x4F4D;</h2>
+                <div class="filter-tabs">
+                    <button class="tab" data-filter="all">&#x5168;&#x90E8;</button>
+                    <button class="tab active" data-filter="active">&#x6301;&#x5009;</button>
+                    <button class="tab" data-filter="potential">&#x5019;&#x9078;</button>
+                </div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>&#x6A19;&#x7684;</th>
+                            <th>&#x72C0;&#x614B;</th>
+                            <th>&#x958B;&#x5009;&#x7406;&#x7531;</th>
+                            <th>&#x5165;&#x5834; / &#x73FE;&#x50F9;</th>
+                            <th>&#x5009;&#x4F4D;</th>
+                            <th>&#x6B62;&#x76C8; / &#x6B62;&#x640D;</th>
+                            <th>&#x5954;&#x8DD1;&#x9032;&#x5EA6;</th>
+                            <th>&#x76C8;&#x8667;</th>
+                        </tr>
+                    </thead>
+                    <tbody id="trades-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="data-panel">
+            <div class="panel-head">
+                <h2>&#x5E02;&#x5834;&#x96F7;&#x9054;</h2>
+                <span id="intel-logic" class="hint"></span>
+            </div>
+            <div id="intel-symbols" class="symbol-cloud"></div>
+            <div class="table-container compact">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>&#x5E63;&#x7A2E;</th>
+                            <th>&#x6A21;&#x5F0F;</th>
+                            <th>&#x6383;&#x63CF;&#x72C0;&#x614B;</th>
+                            <th>&#x4F30;&#x7B97;&#x5009;&#x4F4D;</th>
+                            <th>&#x98A8;&#x5831;&#x6BD4;</th>
+                        </tr>
+                    </thead>
+                    <tbody id="radar-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="data-panel">
+            <div class="panel-head">
+                <h2>&#x5DF2;&#x5E73;&#x5009;&#x7D00;&#x9304;</h2>
+                <span class="hint">OKX &#x5BE6;&#x969B;&#x5DF2;&#x5BE6;&#x73FE;&#x640D;&#x76CA;&#xFF08;&#x542B;&#x624B;&#x7E8C;&#x8CBB;&#x8207;&#x8CC7;&#x91D1;&#x8CBB;&#xFF09;</span>
+            </div>
+            <div class="table-container compact">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>&#x6A19;&#x7684;</th>
+                            <th>&#x65B9;&#x5411;</th>
+                            <th>&#x5F15;&#x64CE;</th>
+                            <th>&#x69D3;&#x687F;</th>
+                            <th>&#x76C8;&#x8667;</th>
+                            <th>&#x6642;&#x9593;</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body"></tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    <script src="app.js?v=33"></script>
+</body>
+</html>
