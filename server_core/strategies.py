@@ -51,8 +51,9 @@ def squeeze_hunter_release_ready(df, sample=0):
     return was_squeezed and is_expanding
 
 def version_matches_strategy_scope(row_version):
+    # Strict matching: Exclude empty or non-matching versions to guarantee clean session resets
     if not row_version:
-        return True
+        return False
     return str(row_version) == config.STRATEGY_VERSION
 
 def recent_strategy_stats(strategy_name, category=None, limit=40):
