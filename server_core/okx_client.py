@@ -7,7 +7,7 @@ import os
 import pandas as pd
 from . import config
 from . import state
-from .utils import as_float, clamp, json_safe, lifecycle_trade_for_history, assess_accounting_record, history_event_key
+from .utils import as_float, clamp, json_safe, lifecycle_trade_for_history, assess_accounting_record, history_event_key, history_pos_id
 
 okx = ccxt.okx({
     'apiKey': config.OKX_API_KEY,
@@ -27,13 +27,84 @@ def sync_exchange_history(force=False):
     try:
         raw_history = okx.fetch_positions_history(None, None, config.EXCHANGE_HISTORY_LIMIT)
         normalized = []
+        deduped = {}
+
+        def row_dedupe_key(row):
+            pos_id = str(row.get('posId') or '')
+            closed_at = str(row.get('closed_at') or row.get('lastUpdateTimestamp') or row.get('timestamp') or '')
+            inst_id = str(row.get('instId') or row.get('symbol') or '')
+            direction = str(row.get('direction') or '').lower()
+            key = str(row.get('close_event_key') or '')
+            if key:
+                return key
+            return f'{pos_id}:{closed_at}:{inst_id}:{direction}'
+
+        def row_priority(row):
+            strategy_name = str(row.get('strategy') or '')
+            accounting_status = str(row.get('accounting_status') or '')
+            return (
+                1 if strategy_name == 'Manual' else 0,
+                1 if accounting_status == 'manual' else 0,
+                1 if row.get('eligible_for_learning') is not True else 0,
+                1 if not row.get('lifecycle_id') else 0,
+                1 if not row.get('strategy_version') else 0,
+                -as_float(row.get('realizedPnl') or row.get('alphaPnl') or 0),
+            )
+
         for item in raw_history:
             record = dict(item)
             info = dict(record.get('info') or {})
-            pos_id = str(record.get('id') or info.get('posId') or '')
+            pos_id = history_pos_id(record)
+            inst_id = str(info.get('instId') or record.get('instId') or '')
+            direction = str(info.get('direction') or record.get('side') or '').lower()
+
             lifecycle = lifecycle_trade_for_history(record)
-            strategy = lifecycle.get('strategy') if lifecycle else 'Manual'
-            version = lifecycle.get('strategy_version') if lifecycle else None
+            recovered = None
+            fallback_manual = None
+
+            if not lifecycle and pos_id:
+                for row in reversed(state.trade_journal):
+                    if str(row.get('posId') or '') != pos_id:
+                        continue
+                    trade_inst = str(row.get('instId') or '')
+                    trade_direction = str(row.get('direction') or '').lower()
+                    history_inst = inst_id
+                    history_direction = direction
+                    if history_inst and trade_inst and history_inst != trade_inst:
+                        continue
+                    if history_direction and trade_direction and history_direction != trade_direction:
+                        continue
+                    if str(row.get('strategy') or '') == 'Manual':
+                        if fallback_manual is None:
+                            fallback_manual = row
+                        continue
+                    recovered = row
+                    break
+                if recovered is None:
+                    recovered = fallback_manual
+
+            effective_lifecycle = lifecycle or recovered
+            if effective_lifecycle and str(effective_lifecycle.get('strategy') or '') == 'Manual' and inst_id:
+                better_lifecycle = next(
+                    (
+                        row for row in reversed(state.trade_journal)
+                        if str(row.get('instId') or '') == inst_id
+                        and str(row.get('direction') or '').lower() == direction
+                        and str(row.get('strategy') or '') not in ['', 'Manual', 'Mixed']
+                    ),
+                    None,
+                )
+                if better_lifecycle is not None:
+                    effective_lifecycle = better_lifecycle
+
+            strategy = effective_lifecycle.get('strategy') if effective_lifecycle else 'Manual'
+            version = effective_lifecycle.get('strategy_version') if effective_lifecycle else None
+            closed_at = (
+                record.get('lastUpdateTimestamp')
+                or record.get('timestamp')
+                or info.get('uTime')
+                or info.get('cTime')
+            )
             raw_pnl = (
                 record.get('realizedPnl') or info.get('realizedPnl')
                 or record.get('pnl') or info.get('pnl')
@@ -41,6 +112,7 @@ def sync_exchange_history(force=False):
             realized = as_float(raw_pnl)
             fee = as_float(info.get('fee'))
             funding_fee = as_float(info.get('fundingFee') or info.get('funding'))
+
             record.update({
                 'strategy': strategy,
                 'strategy_mix': [strategy] if strategy not in ['Manual', 'Mixed'] else [],
@@ -52,20 +124,72 @@ def sync_exchange_history(force=False):
                 'fundingFee': funding_fee,
                 'pnl_source': 'okx_realized',
                 'posId': pos_id,
-                'lifecycle_id': lifecycle.get('lifecycle_id') if lifecycle else None,
+                'lifecycle_id': effective_lifecycle.get('lifecycle_id') if effective_lifecycle else None,
                 'close_event_key': history_event_key(record),
                 'direction': info.get('direction') or record.get('side'),
+                'instId': inst_id or None,
+                'symbol': info.get('instId') or record.get('symbol') or inst_id or None,
                 'closePrice': as_float(info.get('closeAvgPx'), record.get('lastPrice')),
                 'openPrice': as_float(info.get('openAvgPx'), record.get('entryPrice')),
+                'closed_at': closed_at,
             })
-            record.update(assess_accounting_record(record, lifecycle))
+            record.update(assess_accounting_record(record, effective_lifecycle))
             normalized.append(record)
+
+        for row in normalized:
+            key = row_dedupe_key(row)
+            existing = deduped.get(key)
+            if existing is None or row_priority(row) < row_priority(existing):
+                deduped[key] = row
+        normalized = list(deduped.values())
+
+        if not normalized and state.trade_journal:
+            fallback_history = []
+            for row in reversed(state.trade_journal):
+                if row.get('status') != 'closed' and not row.get('closed_at'):
+                    continue
+                fallback_row = dict(row)
+                fallback_row.setdefault('pnl_source', 'journal_fallback')
+                fallback_row.setdefault('realizedPnl', as_float(row.get('realized_pnl', row.get('pnl'))))
+                fallback_row.setdefault('alphaPnl', as_float(row.get('realized_pnl', row.get('pnl'))) - as_float(row.get('funding_fee')))
+                fallback_row.setdefault('fee', as_float(row.get('fee')))
+                fallback_row.setdefault('fundingFee', as_float(row.get('funding_fee')))
+                fallback_row.setdefault('strategy_version', row.get('strategy_version'))
+                fallback_row.setdefault('strategy_mix', [row.get('strategy')] if row.get('strategy') not in ['Manual', 'Mixed'] else [])
+                fallback_row.setdefault('strategy_versions', [row.get('strategy_version')] if row.get('strategy_version') else [])
+                fallback_row.setdefault('accounting_status', row.get('accounting_status'))
+                fallback_row.setdefault('eligible_for_learning', row.get('eligible_for_learning'))
+                fallback_row.setdefault('accounting_reasons', row.get('accounting_reasons') or [])
+                fallback_history.append(fallback_row)
+            normalized = fallback_history[:config.EXCHANGE_HISTORY_LIMIT]
+
         normalized.sort(key=lambda row: int(row.get('lastUpdateTimestamp') or row.get('timestamp') or 0), reverse=True)
         state.exchange_history_cache = normalized
         state.exchange_history_synced_at = now
         state.exchange_history_error = None
     except Exception as exc:
         state.exchange_history_error = str(exc)
+        fallback_history = []
+        for row in reversed(state.trade_journal or []):
+            if row.get('status') != 'closed' and not row.get('closed_at'):
+                continue
+            fallback_row = dict(row)
+            fallback_row.setdefault('pnl_source', 'journal_fallback')
+            fallback_row.setdefault('realizedPnl', as_float(row.get('realized_pnl', row.get('pnl'))))
+            fallback_row.setdefault('alphaPnl', as_float(row.get('realized_pnl', row.get('pnl'))) - as_float(row.get('funding_fee')))
+            fallback_row.setdefault('fee', as_float(row.get('fee')))
+            fallback_row.setdefault('fundingFee', as_float(row.get('funding_fee')))
+            fallback_row.setdefault('strategy_version', row.get('strategy_version'))
+            fallback_row.setdefault('strategy_mix', [row.get('strategy')] if row.get('strategy') not in ['Manual', 'Mixed'] else [])
+            fallback_row.setdefault('strategy_versions', [row.get('strategy_version')] if row.get('strategy_version') else [])
+            fallback_row.setdefault('accounting_status', row.get('accounting_status'))
+            fallback_row.setdefault('eligible_for_learning', row.get('eligible_for_learning'))
+            fallback_row.setdefault('accounting_reasons', row.get('accounting_reasons') or [])
+            fallback_history.append(fallback_row)
+        if fallback_history:
+            fallback_history.sort(key=lambda row: int(row.get('lastUpdateTimestamp') or row.get('timestamp') or 0), reverse=True)
+            state.exchange_history_cache = fallback_history[:config.EXCHANGE_HISTORY_LIMIT]
+            state.exchange_history_synced_at = now
     finally:
         state.exchange_history_lock.release()
     return state.exchange_history_cache
@@ -109,7 +233,7 @@ def realized_strategy_rows(strategy_name, limit):
             if row.get('strategy') == strategy_name
             and row.get('status') == 'closed'
             and row.get('eligible_for_learning') is not False
-            and (not row.get('strategy_version') or version_matches_strategy_scope(row.get('strategy_version')))
+            and version_matches_strategy_scope(row.get('strategy_version'))
         ]
         for row in journal_rows:
             key = row_key(row)
@@ -446,24 +570,23 @@ def fetch_data(symbol, timeframe, limit=200):
             last_error = exc
             message = str(exc).lower()
             rate_limited = isinstance(exc, ccxt.RateLimitExceeded) or '50011' in message or 'too many requests' in message
-            if not rate_limited or attempt == 3:
-                local_snapshot = load_local_market_snapshot()
-                inst_id = resolve_okx_inst_id(symbol)
-                snapshot_item = local_snapshot.get(inst_id)
-                if snapshot_item:
-                    synthetic = build_synthetic_candles_from_snapshot(snapshot_item, timeframe, limit)
-                    if synthetic:
-                        print(f"[fetch_data fallback] {symbol} {timeframe}: using local market snapshot after error: {exc}")
-                        ohlcv = synthetic
-                        break
-                with state.market_data_lock:
-                    cached = state.market_data_cache.get(cache_key)
-                    cached_df = cached.get('data') if cached else None
-                    if cached_df is not None and len(cached_df) >= 20:
-                        print(f"[fetch_data fallback] {symbol} {timeframe}: using cached candles after error: {exc}")
-                        return cached_df.copy(deep=False)
-                raise
-            time.sleep(3.5 * (attempt + 1))
+            local_snapshot = load_local_market_snapshot()
+            inst_id = resolve_okx_inst_id(symbol)
+            snapshot_item = local_snapshot.get(inst_id)
+            if snapshot_item:
+                synthetic = build_synthetic_candles_from_snapshot(snapshot_item, timeframe, limit)
+                if synthetic:
+                    print(f"[fetch_data fallback] {symbol} {timeframe}: using local market snapshot after error: {exc}")
+                    ohlcv = synthetic
+                    break
+            with state.market_data_lock:
+                cached = state.market_data_cache.get(cache_key)
+                cached_df = cached.get('data') if cached else None
+                if cached_df is not None and len(cached_df) >= 20:
+                    print(f"[fetch_data fallback] {symbol} {timeframe}: using cached candles after error: {exc}")
+                    return cached_df.copy(deep=False)
+            if attempt < 3:
+                time.sleep(2.0 * (attempt + 1))
     else:
         with state.market_data_lock:
             cached = state.market_data_cache.get(cache_key)
@@ -471,7 +594,8 @@ def fetch_data(symbol, timeframe, limit=200):
             if cached_df is not None and len(cached_df) >= 20:
                 print(f"[fetch_data fallback] {symbol} {timeframe}: using cached candles after repeated errors: {last_error}")
                 return cached_df.copy(deep=False)
-        raise last_error
+        print(f"[fetch_data fallback] {symbol} {timeframe}: returning empty frame after repeated errors: {last_error}")
+        return pd.DataFrame()
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp'], keep='last').reset_index(drop=True)
@@ -581,6 +705,43 @@ def fetch_open_positions_snapshot(force=False):
             state.positions_snapshot_cache['normalized'] = []
         return positions
     except Exception as exc:
+        with state.positions_snapshot_lock:
+            cached = state.positions_snapshot_cache.get('raw') or []
+            if cached:
+                print(f"[positions fallback] {exc}")
+                return [dict(p) for p in cached]
+        if state.active_trades:
+            print(f"[positions fallback] {exc}")
+            fallback_positions = []
+            for trade in state.active_trades:
+                if trade.get('status') != 'active':
+                    continue
+                fallback_positions.append({
+                    'id': trade.get('posId') or trade.get('id') or trade.get('symbol'),
+                    'posId': trade.get('posId') or trade.get('id') or trade.get('symbol'),
+                    'instId': trade.get('instId') or trade.get('symbol'),
+                    'symbol': trade.get('instId') or trade.get('symbol'),
+                    'raw_symbol': trade.get('instId') or trade.get('symbol'),
+                    'side': trade.get('direction') or 'long',
+                    'posSide': trade.get('direction') or 'long',
+                    'direction': trade.get('direction') or 'long',
+                    'status': 'active',
+                    'source': 'local_active_trade_fallback',
+                    'entryPrice': as_float(trade.get('entry')),
+                    'markPrice': as_float(trade.get('current') or trade.get('entry')),
+                    'unrealizedPnl': as_float(trade.get('pnl')),
+                    'percentage': as_float(trade.get('percentage')),
+                    'leverage': trade.get('leverage'),
+                    'initialMargin': as_float(trade.get('initialMargin')),
+                    'notional': as_float(trade.get('notional')),
+                    'liquidationPrice': as_float(trade.get('liquidationPrice')),
+                    'marginRatio': as_float(trade.get('marginRatio')),
+                    'contracts': as_float(trade.get('contracts') or trade.get('filled_contracts')),
+                    'availPos': as_float(trade.get('contracts') or trade.get('filled_contracts')),
+                    'marginMode': trade.get('marginMode'),
+                    'info': dict(trade),
+                })
+            return fallback_positions
         print(f"[positions ERROR] {exc}")
         return []
 
