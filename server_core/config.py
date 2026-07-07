@@ -1,11 +1,15 @@
 import datetime
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+WORKSPACE_DIR = PROJECT_DIR.parent
 
 OKX_API_KEY = 'f1b9af15-e584-4911-b949-ff42168fd53c'
 OKX_SECRET = 'A64C98D3C5E8B38A963566313BA31EF1'
 OKX_PASSWORD = '@Sweetsweet556'
 
 BASE_MARGIN_USDT = 60.0
-STRATEGY_VERSION = 'netmode-align-v9-20260705'
+STRATEGY_VERSION = 'netmode-align-v10-20260708'
 START_EQUITY_USDT = 5000.0
 TARGET_EQUITY_USDT = 10000.0
 SESSION_STARTED_AT = datetime.datetime.now().isoformat(timespec='seconds')
@@ -55,6 +59,12 @@ ACCOUNTING_MIN_ADVERSE_MOVE_PCT = 0.05
 PROTECTION_RETRY_BASE_SECONDS = 5
 PROTECTION_RETRY_MAX_SECONDS = 60
 PROTECTION_MISSING_CONFIRMATIONS = 3
+ORPHAN_BYPASS_ENABLED = True
+ORPHAN_BYPASS_SYMBOLS = {
+    'BLUAI-USDT-SWAP',
+}
+ORPHAN_ASKLESS_CONFIRMATIONS = 3
+ORPHAN_ORDERBOOK_LIMIT = 5
 
 NON_CRYPTO_BASES = {
     'USDC', 'USDE', 'USDG', 'FDUSD', 'TUSD', 'DAI', 'PYUSD',
@@ -78,60 +88,120 @@ MARKET_DATA_TTL_SECONDS = {
 }
 
 NODE_NAME = 'macmini_01'
-TRADE_FILE = f'active_trades_{NODE_NAME}.json'
-JOURNAL_FILE = f'journal_{NODE_NAME}.json'
+TRADE_FILE = str(PROJECT_DIR / f'active_trades_{NODE_NAME}.json')
+JOURNAL_FILE = str(PROJECT_DIR / f'journal_{NODE_NAME}.json')
+LEGACY_TRADE_FILE = str(PROJECT_DIR / 'active_trades.json')
+LEGACY_JOURNAL_FILE = str(PROJECT_DIR / 'trade_journal.json')
 
-LOCAL_MARKET_SNAPSHOT_PATH = '../auto-trader-swap/state/market-snapshot.json'
-LOCAL_ACCOUNT_SNAPSHOT_PATHS = ['api_dump.json', 'api_output.json']
+LOCAL_MARKET_SNAPSHOT_PATH = str(WORKSPACE_DIR / 'auto-trader-swap' / 'state' / 'market-snapshot.json')
+LOCAL_ACCOUNT_SNAPSHOT_PATHS = [
+    str(PROJECT_DIR / 'api_dump.json'),
+    str(PROJECT_DIR / 'api_output.json'),
+]
 
 STRATEGY_PROFILES = {
     'MacroSniper': {
         'label': 'Macro Sniper',
         'role': '1h/4h trend rider. Fewer entries, larger runner target.',
         'margin_mult': 1.10,
-        'sl_atr': 1.6,
-        'tp_atr': 6.0,
-        'min_rr': 0.8,
-        'be_threshold': 0.14,
-        'lock_threshold': 0.30,
-        'trail_buffer': 0.10,
-        'remove_tp_at': 0.60,
+        'sl_atr': 1.4,         # 收緊止損，提高盈虧比
+        'tp_atr': 6.5,         # 放大波段目標
+        'min_rr': 1.50,        # 追求高盈虧比
+        'be_threshold': 0.20,  # 留有波動空間
+        'lock_threshold': 0.40,
+        'trail_buffer': 0.12,
+        'remove_tp_at': 0.50,  # 利潤奔跑
     },
     'MeanReversion': {
         'label': 'Mean Reversion',
         'role': 'Fast oversold/overbought repair. Smaller target, fast lock.',
         'margin_mult': 0.95,
-        'sl_atr': 1.4,
-        'tp_atr': 2.2,
-        'min_rr': 0.7,
-        'be_threshold': 0.12,
-        'lock_threshold': 0.28,
-        'trail_buffer': 0.09,
-        'remove_tp_at': 0.80,
+        'sl_atr': 0.85,        # 均值回歸一旦破位即認錯
+        'tp_atr': 1.8,         # 快速止盈
+        'min_rr': 1.05,        # 保持健康盈虧比
+        'be_threshold': 0.05,  # 極速拉成本防回撤
+        'lock_threshold': 0.18, # 儘早鎖定利潤
+        'trail_buffer': 0.06,
+        'remove_tp_at': 0.95,  # 均值回歸不追求無限奔跑
     },
     'Contrarian': {
         'label': 'Contrarian',
         'role': 'Extreme reversal hunter. Wider stop, needs exhaustion proof.',
         'margin_mult': 0.85,
-        'sl_atr': 2.0,
-        'tp_atr': 3.4,
-        'min_rr': 0.85,
-        'be_threshold': 0.14,
-        'lock_threshold': 0.32,
-        'trail_buffer': 0.11,
-        'remove_tp_at': 0.70,
+        'sl_atr': 1.2,         # 配合極端 RSI 進場，止損可以收窄
+        'tp_atr': 3.8,         # 抓波段大拐點
+        'min_rr': 1.50,
+        'be_threshold': 0.10,
+        'lock_threshold': 0.30,
+        'trail_buffer': 0.08,
+        'remove_tp_at': 0.60,
     },
     'SqueezeHunter': {
         'label': 'Squeeze Hunter',
         'role': 'Volatility expansion hunter. Requires fresh squeeze release and confirmed breakout.',
         'margin_mult': 1.00,
-        'sl_atr': 1.5,
-        'tp_atr': 3.5,
-        'min_rr': 1.05,
+        'sl_atr': 1.2,         # 突破型態不需要太寬的止損
+        'tp_atr': 4.5,         # 追突破要吃大單邊
+        'min_rr': 1.30,
         'be_threshold': 0.12,
         'lock_threshold': 0.26,
         'trail_buffer': 0.08,
-        'remove_tp_at': 0.55,
+        'remove_tp_at': 0.45,  # 儘早撤 TP 讓大單邊奔跑
+    },
+}
+
+MODE_TRAINING_PROFILES = {
+    'MacroSniper': {
+        'pressure_scale': 1.15,
+        'positive_relief': 0.02,
+        'rr_expand': 0.24,
+        'profit_expand': 0.18,
+        'cooldown_expand': 0.18,
+        'tolerance_shrink': 0.20,
+        'min_rr_expand': 0.20,
+        'edge_boost': 0.30,
+        'slippage_edge_factor': 18.0,
+        'sample_penalty': 0.06,
+        'min_sample_floor': 30,
+    },
+    'MeanReversion': {
+        'pressure_scale': 0.72,
+        'positive_relief': 0.16,
+        'rr_expand': 0.08,
+        'profit_expand': 0.06,
+        'cooldown_expand': 0.08,
+        'tolerance_shrink': 0.08,
+        'min_rr_expand': 0.10,
+        'edge_boost': 0.12,
+        'slippage_edge_factor': 10.0,
+        'sample_penalty': 0.00,
+        'min_sample_floor': 20,
+    },
+    'Contrarian': {
+        'pressure_scale': 0.92,
+        'positive_relief': 0.05,
+        'rr_expand': 0.16,
+        'profit_expand': 0.10,
+        'cooldown_expand': 0.14,
+        'tolerance_shrink': 0.14,
+        'min_rr_expand': 0.18,
+        'edge_boost': 0.20,
+        'slippage_edge_factor': 14.0,
+        'sample_penalty': 0.03,
+        'min_sample_floor': 25,
+    },
+    'SqueezeHunter': {
+        'pressure_scale': 0.68,
+        'positive_relief': 0.14,
+        'rr_expand': 0.10,
+        'profit_expand': 0.12,
+        'cooldown_expand': 0.10,
+        'tolerance_shrink': 0.10,
+        'min_rr_expand': 0.12,
+        'edge_boost': 0.14,
+        'slippage_edge_factor': 12.0,
+        'sample_penalty': 0.04,
+        'min_sample_floor': 15,
     },
 }
 
@@ -146,24 +216,24 @@ CATEGORY_PROFILES = {
 
 EXIT_STATE_LIMITS = {
     'MacroSniper': {
-        'explore': {'sl_cap': 0.0250, 'tp_cap': 0.0950, 'rr_floor': 1.35},
-        'train': {'sl_cap': 0.0220, 'tp_cap': 0.0800, 'rr_floor': 1.25},
-        'recover': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.15},
+        'explore': {'sl_cap': 0.0250, 'tp_cap': 0.0950, 'rr_floor': 1.65},
+        'train': {'sl_cap': 0.0220, 'tp_cap': 0.0800, 'rr_floor': 1.50},
+        'recover': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.35},
     },
     'MeanReversion': {
-        'explore': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.30},
-        'train': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.20},
-        'recover': {'sl_cap': 0.0140, 'tp_cap': 0.0450, 'rr_floor': 1.10},
+        'explore': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.25},
+        'train': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.15},
+        'recover': {'sl_cap': 0.0140, 'tp_cap': 0.0450, 'rr_floor': 1.05},
     },
     'Contrarian': {
-        'explore': {'sl_cap': 0.0220, 'tp_cap': 0.0750, 'rr_floor': 1.35},
-        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0600, 'rr_floor': 1.25},
-        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.15},
+        'explore': {'sl_cap': 0.0220, 'tp_cap': 0.0750, 'rr_floor': 1.60},
+        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0600, 'rr_floor': 1.45},
+        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.30},
     },
     'SqueezeHunter': {
-        'explore': {'sl_cap': 0.0200, 'tp_cap': 0.0700, 'rr_floor': 1.40},
-        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0550, 'rr_floor': 1.25},
-        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0450, 'rr_floor': 1.15},
+        'explore': {'sl_cap': 0.0200, 'tp_cap': 0.0700, 'rr_floor': 1.50},
+        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0550, 'rr_floor': 1.35},
+        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0450, 'rr_floor': 1.20},
     },
 }
 

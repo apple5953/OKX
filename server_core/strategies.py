@@ -1,9 +1,14 @@
+import datetime
+import json
 import math
+import os
+import statistics
 import time
+from pathlib import Path
 import pandas as pd
 from . import config
 from . import state
-from .utils import as_float, clamp
+from .utils import as_float, clamp, write_json_atomic
 from types import SimpleNamespace
 
 def strategy_profile(strategy_name):
@@ -145,14 +150,336 @@ def strategy_performance(strategy_name, limit=120):
         'funding_excluded': True, 'win_count': win_count, 'loss_count': loss_count
     }
 
+def optimizer_manifest_path():
+    return Path(config.PROJECT_DIR) / 'global_optimizer.json'
+
+def training_cycle_state_path():
+    return Path(config.PROJECT_DIR) / 'optimization_cycle_state.json'
+
+def load_training_cycle_state():
+    default_state = {
+        'generation': config.STRATEGY_VERSION,
+        'last_evaluated_trade_count': 0,
+        'completed_cycles': 0,
+        'consecutive_positive_cycles': 0,
+        'last_checked_at': None,
+        'mode': 'training_active',
+        'summary': {},
+        'top_drags': [],
+        'strategies': {},
+        'notes': '',
+    }
+    path = training_cycle_state_path()
+    if not path.exists():
+        return default_state
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            saved_generation = str(payload.get('generation') or '')
+            if saved_generation and saved_generation != config.STRATEGY_VERSION:
+                payload = {
+                    'generation': config.STRATEGY_VERSION,
+                    'last_evaluated_trade_count': 0,
+                    'completed_cycles': 0,
+                    'consecutive_positive_cycles': 0,
+                    'last_checked_at': payload.get('last_checked_at'),
+                    'mode': 'training_active',
+                    'summary': {},
+                    'top_drags': [],
+                    'strategies': {},
+                    'notes': f'generation reset from {saved_generation} to {config.STRATEGY_VERSION}',
+                    'previous_generation': saved_generation,
+                }
+            default_state.update(payload)
+    except Exception:
+        pass
+    return default_state
+
+def _trade_quality_metrics(strategy_name):
+    rows = [
+        row for row in reversed(state.trade_journal or [])
+        if row.get('strategy') == strategy_name and row.get('status') == 'closed'
+    ]
+    planned_rrs = []
+    entry_slippage = []
+    realized_pnls = []
+    for row in rows:
+        entry = as_float(row.get('entry'))
+        sl = as_float(row.get('sl'))
+        tp1 = as_float(row.get('tp1'))
+        signal_close = as_float(row.get('signal_close') or row.get('entry_reference'))
+        if entry > 0 and sl > 0 and tp1 > 0:
+            risk = abs(entry - sl)
+            reward = abs(tp1 - entry)
+            if risk > 0:
+                planned_rrs.append(reward / risk)
+        if entry > 0 and signal_close > 0:
+            entry_slippage.append(abs(entry - signal_close) / signal_close)
+        realized_pnls.append(as_float(row.get('realized_pnl', row.get('pnl'))))
+
+    median_rr = statistics.median(planned_rrs) if planned_rrs else 0.0
+    median_slippage = statistics.median(entry_slippage) if entry_slippage else 0.0
+    avg_realized = (sum(realized_pnls) / len(realized_pnls)) if realized_pnls else 0.0
+    return {
+        'median_planned_rr': round(median_rr, 4),
+        'median_entry_slippage_pct': round(median_slippage * 100, 4),
+        'avg_realized_pnl': round(avg_realized, 4),
+        'closed_sample': len(rows),
+    }
+
+def build_training_optimizer(strategy_name, perf=None, cycle_state=None):
+    if perf is None:
+        perf = strategy_performance(strategy_name)
+    if cycle_state is None:
+        cycle_state = load_training_cycle_state()
+
+    base = dict(auto_tune_strategy_params(strategy_name, perf))
+    mode_profile = dict(config.MODE_TRAINING_PROFILES.get(strategy_name) or {})
+    quality = _trade_quality_metrics(strategy_name)
+    pf = as_float(perf.get('profit_factor'))
+    expectancy = as_float(perf.get('expectancy'))
+    win_rate = as_float(perf.get('win_rate'))
+    sample = int(perf.get('total_trades') or 0)
+
+    pressure = 0.0
+    if pf < 0.80:
+        pressure += 0.45
+    elif pf < 0.95:
+        pressure += 0.25
+    elif pf < 1.05:
+        pressure += 0.10
+    if expectancy < -0.25:
+        pressure += 0.30
+    elif expectancy < 0:
+        pressure += 0.16
+    if win_rate < 40:
+        pressure += 0.10
+    elif win_rate < 50:
+        pressure += 0.05
+
+    entry_slippage = quality['median_entry_slippage_pct'] / 100.0
+    planned_rr = quality['median_planned_rr']
+    if entry_slippage > 0.002:
+        pressure += min(0.20, entry_slippage * 12.0)
+    if planned_rr > 0 and planned_rr < strategy_profile(strategy_name)['min_rr']:
+        pressure += 0.12
+
+    manual_ratio = as_float(cycle_state.get('manual_ratio'))
+    if manual_ratio > 0.35:
+        pressure += min(0.12, manual_ratio * 0.25)
+
+    if sample >= 25 and (pf < 0.75 or expectancy < -0.75):
+        optimizer_state = 'firewall'
+    elif sample >= 20 and (pf < 0.90 or expectancy < 0):
+        optimizer_state = 'recover'
+    elif sample >= 30 and pf >= 1.25 and expectancy > 0.5:
+        optimizer_state = 'exploit'
+    elif sample >= 15 and pf >= 1.08 and expectancy >= 0:
+        optimizer_state = 'steady'
+    else:
+        optimizer_state = 'explore'
+
+    if optimizer_state == 'exploit':
+        pressure = max(0.0, pressure - 0.20)
+    elif optimizer_state == 'steady':
+        pressure = max(0.0, pressure - 0.08)
+
+    pressure *= as_float(mode_profile.get('pressure_scale') or 1.0)
+    if pf >= 1.05 and expectancy > 0:
+        pressure -= as_float(mode_profile.get('positive_relief') or 0.0)
+    sample_floor = int(mode_profile.get('min_sample_floor') or 0)
+    if sample_floor and sample < sample_floor:
+        pressure += as_float(mode_profile.get('sample_penalty') or 0.0)
+    pressure = clamp(pressure, 0.0, 1.5)
+
+    rr_expand = as_float(mode_profile.get('rr_expand') or 0.18)
+    profit_expand = as_float(mode_profile.get('profit_expand') or 0.15)
+    cooldown_expand = as_float(mode_profile.get('cooldown_expand') or 0.12)
+    tolerance_shrink = as_float(mode_profile.get('tolerance_shrink') or 0.14)
+    min_rr_expand = as_float(mode_profile.get('min_rr_expand') or 0.18)
+    edge_boost = as_float(mode_profile.get('edge_boost') or 0.24)
+    slippage_edge_factor = as_float(mode_profile.get('slippage_edge_factor') or 16.0)
+
+    tuned = {
+        'strategy': strategy_name,
+        'state': optimizer_state,
+        'rr_mult': round(clamp(base.get('rr_mult', 1.0) * (1.0 + pressure * rr_expand), 0.75, 1.80), 4),
+        'profit_mult': round(clamp(base.get('profit_mult', 1.0) * (1.0 + pressure * profit_expand), 0.60, 1.80), 4),
+        'cooldown_mult': round(clamp(base.get('cooldown_mult', 1.0) * (1.0 + pressure * cooldown_expand), 0.60, 2.50), 4),
+        'tolerance_mult': round(clamp(base.get('tolerance_mult', 1.0) * (1.0 - pressure * tolerance_shrink), 0.55, 1.20), 4),
+        'target_rr_mult': round(clamp(base.get('target_rr_mult', 1.0) * (1.0 + pressure * 0.22), 0.70, 2.20), 4),
+        'min_profit_mult': round(clamp(base.get('min_profit_mult', 1.0) * (1.0 + pressure * 0.10), 0.60, 2.00), 4),
+        'min_rr': round(clamp(strategy_profile(strategy_name)['min_rr'] * (1.0 + pressure * min_rr_expand), 0.50, 2.50), 4),
+        'entry_edge_mult': round(clamp(1.0 + pressure * edge_boost + entry_slippage * slippage_edge_factor, 1.0, 1.80), 4),
+        'planned_rr_median': round(planned_rr, 4),
+        'entry_slippage_pct': quality['median_entry_slippage_pct'],
+        'sample_size': sample,
+        'profit_factor': round(pf, 3),
+        'expectancy': round(expectancy, 4),
+        'win_rate': round(win_rate, 2),
+        'closed_sample': quality['closed_sample'],
+    }
+    return tuned
+
+def write_global_optimizer_manifest(optimizers, cycle_state=None):
+    payload = {}
+    for name, opt in optimizers.items():
+        entry = dict(opt)
+        entry.setdefault('tolerance_mult', 1.0)
+        entry.setdefault('min_profit_mult', entry.get('profit_mult', 1.0))
+        entry.setdefault('target_rr_mult', entry.get('rr_mult', 1.0))
+        entry.setdefault('entry_edge_mult', 1.0)
+        entry.setdefault('min_rr', strategy_profile(name)['min_rr'])
+        payload[name] = entry
+    write_json_atomic(str(optimizer_manifest_path()), payload)
+    if cycle_state is not None:
+        state_payload = dict(cycle_state)
+        state_payload['last_optimizer_write'] = time.time()
+        write_json_atomic(str(training_cycle_state_path()), state_payload)
+    return payload
+
+def run_training_cycle(force_history=False):
+    from .okx_client import sync_exchange_history
+    history = sync_exchange_history(force=force_history)
+    if not history:
+        history = list(state.exchange_history_cache or [])
+    if not history:
+        history = [
+            dict(row)
+            for row in reversed(state.trade_journal or [])
+            if row.get('status') == 'closed' or row.get('closed_at')
+        ]
+    manual_rows = [row for row in history if str(row.get('strategy') or '') == 'Manual']
+    total_history = len(history)
+    manual_ratio = (len(manual_rows) / total_history) if total_history else 0.0
+
+    perf = all_strategy_performance()
+    cycle_state = load_training_cycle_state()
+    previous_summary = cycle_state.get('summary') or {}
+    previous_pnl = as_float(previous_summary.get('portfolio_total_pnl'))
+    cycle_state['manual_ratio'] = round(manual_ratio, 4)
+
+    optimizers = {}
+    strategy_reports = {}
+    for name in config.STRATEGY_PROFILES:
+        tuned = build_training_optimizer(name, perf.get(name), cycle_state)
+        optimizers[name] = tuned
+        strategy_reports[name] = {
+            'strategy': name,
+            'state': tuned['state'],
+            'profit_factor': tuned['profit_factor'],
+            'expectancy': tuned['expectancy'],
+            'win_rate': tuned['win_rate'],
+            'sample_size': tuned['sample_size'],
+            'entry_edge_mult': tuned['entry_edge_mult'],
+            'min_rr': tuned['min_rr'],
+            'planned_rr_median': tuned['planned_rr_median'],
+            'entry_slippage_pct': tuned['entry_slippage_pct'],
+            'closed_sample': tuned['closed_sample'],
+        }
+
+    portfolio_total_pnl = round(sum(as_float(perf[name].get('total_pnl')) for name in perf), 4)
+    avg_pf = round(sum(as_float(perf[name].get('profit_factor')) for name in perf) / max(1, len(perf)), 3)
+    avg_win_rate = round(sum(as_float(perf[name].get('win_rate')) for name in perf) / max(1, len(perf)), 2)
+    improved = previous_summary and (
+        portfolio_total_pnl > previous_pnl
+        or avg_pf > as_float(previous_summary.get('avg_profit_factor'))
+    )
+
+    if improved:
+        consecutive_positive_cycles = int(cycle_state.get('consecutive_positive_cycles') or 0) + 1
+    else:
+        consecutive_positive_cycles = 0
+
+    top_drags = [
+        {
+            'source': 'manual_history',
+            'severity': round(manual_ratio, 4),
+            'value': len(manual_rows),
+            'detail': f'{len(manual_rows)} / {total_history} history rows are Manual',
+        },
+        {
+            'source': 'portfolio_expectancy',
+            'severity': round(max(0.0, -sum(min(0.0, as_float(perf[name].get("expectancy"))) for name in perf)), 4),
+            'value': round(sum(as_float(perf[name].get('expectancy')) for name in perf), 4),
+            'detail': 'negative expectancy is still suppressing training quality',
+        },
+        {
+            'source': 'entry_quality',
+            'severity': round(
+                max(
+                    as_float(report.get('entry_edge_mult')) - 1.0
+                    for report in strategy_reports.values()
+                ),
+                4,
+            ) if strategy_reports else 0.0,
+            'value': round(
+                sum(as_float(report.get('entry_slippage_pct')) for report in strategy_reports.values())
+                / max(1, len(strategy_reports)),
+                4,
+            ) if strategy_reports else 0.0,
+            'detail': 'tightened entry edge is now feeding the scan loop',
+        },
+    ]
+    top_drags.sort(key=lambda item: item['severity'], reverse=True)
+
+    cycle_state.update({
+        'generation': config.STRATEGY_VERSION,
+        'last_evaluated_trade_count': sum(int(perf[name].get('total_trades') or 0) for name in perf),
+        'completed_cycles': int(cycle_state.get('completed_cycles') or 0) + 1,
+        'consecutive_positive_cycles': consecutive_positive_cycles,
+        'last_checked_at': datetime.datetime.now(datetime.UTC).isoformat(),
+        'mode': 'training_active',
+        'summary': {
+            'portfolio_total_pnl': portfolio_total_pnl,
+            'avg_profit_factor': avg_pf,
+            'avg_win_rate': avg_win_rate,
+            'manual_ratio': round(manual_ratio, 4),
+            'history_rows': total_history,
+            'positive_cycle': improved,
+        },
+        'strategies': strategy_reports,
+        'top_drags': top_drags,
+        'notes': (
+            f'manual_ratio={manual_ratio:.2%}; '
+            f'avg_pf={avg_pf:.3f}; avg_win_rate={avg_win_rate:.2f}%; '
+            f'cycle={"positive" if improved else "mixed"}'
+        ),
+    })
+
+    write_global_optimizer_manifest(optimizers, cycle_state)
+
+    try:
+        log_line = (
+            f"[Training] pnl={portfolio_total_pnl:.4f}, pf={avg_pf:.3f}, "
+            f"win_rate={avg_win_rate:.2f}%, manual={manual_ratio:.2%}"
+        )
+        state.ml_evolution_logs.append(log_line)
+        if len(state.ml_evolution_logs) > 60:
+            state.ml_evolution_logs = state.ml_evolution_logs[-60:]
+    except Exception:
+        pass
+
+    return cycle_state
+
+def training_loop(interval_seconds=600):
+    while True:
+        try:
+            run_training_cycle(force_history=True)
+        except Exception as exc:
+            print(f"[Training] cycle error: {exc}")
+        time.sleep(interval_seconds)
+
 def all_strategy_performance():
     return {name: strategy_performance(name) for name in ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter']}
 
 def auto_tune_strategy_params(strategy_name, perf=None):
     import json, os
-    if os.path.exists('global_optimizer.json'):
+    optimizer_path = optimizer_manifest_path()
+    if optimizer_path.exists():
         try:
-            with open('global_optimizer.json', 'r', encoding='utf-8') as gf:
+            with open(optimizer_path, 'r', encoding='utf-8') as gf:
                 global_data = json.load(gf)
             if isinstance(global_data, dict) and strategy_name in global_data:
                 opt = dict(global_data[strategy_name])
@@ -160,6 +487,8 @@ def auto_tune_strategy_params(strategy_name, perf=None):
                 opt['tolerance_mult'] = opt.get('tolerance_mult', 1.0)
                 opt['min_profit_mult'] = opt.get('min_profit_mult', opt.get('profit_mult', 1.0))
                 opt['target_rr_mult'] = opt.get('target_rr_mult', opt.get('rr_mult', 1.0))
+                opt['entry_edge_mult'] = opt.get('entry_edge_mult', 1.0)
+                opt['min_rr'] = opt.get('min_rr', strategy_profile(strategy_name)['min_rr'])
                 return opt
         except Exception:
             pass
@@ -206,6 +535,8 @@ def auto_tune_strategy_params(strategy_name, perf=None):
         'tolerance_mult': 1.0,
         'min_profit_mult': profit_mult,
         'target_rr_mult': rr_mult,
+        'entry_edge_mult': 1.0,
+        'min_rr': strategy_profile(strategy_name)['min_rr'],
     }
 
 def performance_block_reason(strategy_name):
@@ -560,32 +891,41 @@ def get_btc_market_regime():
         return 'ranging'
 
 def evaluate_mode_gate(strategy_name, direction, rsi, trends, in_prz, true_rr, target_rr, div_ok, sweep_ok, df, optimizer=None, symbol=None, category=None):
-    # Loosened gate limits for training mode (allows more trading signals)
     symbol = symbol or ''
     is_major = any(kw in symbol.upper() for kw in ['BTC', 'ETH', 'SOL'])
-    regime = get_btc_market_regime()
 
+    # 1. MacroSniper: 大週期趨勢狙擊
     if strategy_name == 'MacroSniper':
-        # Loosened: Allow ranging regime and check 1h trend instead of 4h
-        if direction == 'bullish' and trends.get('1h') != 'bull' and trends.get('4h') != 'bull':
-            return False, 'MacroSniper gate: trend is not bullish'
-        if direction == 'bearish' and trends.get('1h') != 'bear' and trends.get('4h') != 'bear':
-            return False, 'MacroSniper gate: trend is not bearish'
+        # 嚴格趨勢共振：大週期和小週期必須方向一致
+        if direction == 'bullish' and not (trends.get('1h') == 'bull' and trends.get('4h') == 'bull'):
+            return False, 'MacroSniper gate: trend resonance not bullish'
+        if direction == 'bearish' and not (trends.get('1h') == 'bear' and trends.get('4h') == 'bear'):
+            return False, 'MacroSniper gate: trend resonance not bearish'
 
+    # 2. MeanReversion: 快速均值回歸 (只在震盪市或超短期背離進場)
     if strategy_name == 'MeanReversion':
-        # Loosened: Bypass anti-trend safety during training
-        pass
+        # 防止在強大單邊趨勢中接飛刀：大週期 4h 若是強勢，不允許逆大勢做均值回歸
+        if direction == 'bullish' and trends.get('4h') == 'bear':
+            return False, 'MeanReversion gate: cannot buy against strong 4H bear trend'
+        if direction == 'bearish' and trends.get('4h') == 'bull':
+            return False, 'MeanReversion gate: cannot sell against strong 4H bull trend'
 
+    # 3. Contrarian: 拐點反轉 (必須是真正的超買超賣，拒絕中庸價格)
     if strategy_name == 'Contrarian':
-        # Loosened: Expand RSI thresholds from 38/62 to 45/55
-        if direction == 'bullish' and rsi > 45:
-            return False, 'Contrarian gate: RSI too high for long reversal entry (training threshold 45)'
-        if direction == 'bearish' and rsi < 55:
-            return False, 'Contrarian gate: RSI too low for short reversal entry (training threshold 55)'
+        # 嚴格收緊 RSI 限制，非極端不摸頂底
+        if direction == 'bullish' and rsi > 28:
+            return False, f'Contrarian gate: RSI {rsi:.1f} too high for bullish reversal (needs < 28)'
+        if direction == 'bearish' and rsi < 72:
+            return False, f'Contrarian gate: RSI {rsi:.1f} too low for bearish reversal (needs > 72)'
 
+    # 4. SqueezeHunter: 擠壓突破
     if strategy_name == 'SqueezeHunter':
-        # Loosened: Bypass volatility narrowing check
-        pass
+        # 必須有歷史擠壓跡象 (8根K線內有擠壓)，且當前寬度開始放大 (突破發散)
+        if df.empty or len(df) < 8:
+            return False, 'SqueezeHunter gate: insufficient data'
+        was_squeezed = any(df.tail(8)['is_squeezed'])
+        if not was_squeezed:
+            return False, 'SqueezeHunter gate: no volatility squeeze detected in last 8 candles'
 
     return True, ''
 
@@ -652,6 +992,7 @@ def build_bot_report(visible_trades=None, live_positions=None):
     ]
     perf = all_strategy_performance()
     optimizers = {name: auto_tune_strategy_params(name) for name in config.STRATEGY_PROFILES}
+    training_cycle = load_training_cycle_state()
     active_pnl = sum(float(t.get('pnl') or 0) for t in active)
     session_active_pnl = sum(float(t.get('pnl') or 0) for t in session_active)
     session_realized_pnl = sum(float(r.get('realized_pnl') or r.get('realizedPnl') or 0) for r in session_history_rows)
@@ -752,7 +1093,118 @@ def build_bot_report(visible_trades=None, live_positions=None):
         'weak_modes': weak_modes,
         'positions': watch,
         'tracked_positions': tracked_watch,
+        'training_cycle': training_cycle,
         'protection_rule': '浮盈達 0.25R 推近保本，0.55R 鎖利，1R 後用最高 R 回吐 0.35R 移動止損。',
+    }
+
+def build_bot_report(visible_trades=None, live_positions=None):
+    from .engine import build_live_trade_snapshot
+    from .utils import is_session_trade, timestamp_ms, session_started_at_ms
+    from .okx_client import capital_snapshot
+    from . import config
+    from . import state
+    import datetime
+
+    def watch_item(trade):
+        return {
+            'symbol': trade.get('symbol'),
+            'strategy': trade.get('strategy'),
+            'direction': trade.get('direction'),
+            'entry': float(trade.get('entry') or 0),
+            'current': float(trade.get('current') or 0),
+            'sl': float(trade.get('sl') or 0),
+            'tp1': float(trade.get('tp1') or 0),
+            'pnl': round(float(trade.get('pnl') or 0), 4),
+            'highest_pnl': trade.get('highest_pnl'),
+            'highest_r': trade.get('highest_r'),
+            'current_r': trade.get('current_r'),
+            'stage': trade.get('trailing_stage') or 'waiting',
+            'protection': trade.get('runner_policy'),
+            'protection_status': trade.get('protection_status') or 'unconfirmed',
+            'protection_error': trade.get('protection_error'),
+            'actual_margin': trade.get('initialMargin'),
+            'actual_notional': trade.get('notional'),
+            'orphan_bypass': bool(trade.get('orphan_bypass')),
+            'orphan_reason': trade.get('orphan_reason'),
+        }
+
+    if visible_trades is None:
+        visible_trades = build_live_trade_snapshot()
+    if live_positions is None:
+        live_positions = [t for t in visible_trades if t.get('status') == 'active' and t.get('source') == 'okx_live']
+
+    active_all = [t for t in visible_trades if t.get('status') == 'active']
+    orphan_positions = [t for t in active_all if t.get('non_blocking_active')]
+    active = [t for t in active_all if not t.get('non_blocking_active')]
+    potentials = [t for t in visible_trades if t.get('status') == 'potential']
+    session_active = [t for t in active if is_session_trade(t)]
+    session_potentials = [t for t in potentials if is_session_trade(t)]
+    session_history_rows = [
+        row for row in state.trade_journal
+        if timestamp_ms(row.get('closed_at') or row.get('timestamp') or row.get('uTime')) >= session_started_at_ms()
+    ]
+    perf = all_strategy_performance()
+    optimizers = {name: auto_tune_strategy_params(name) for name in config.STRATEGY_PROFILES}
+    training_cycle = load_training_cycle_state()
+    active_pnl = sum(float(t.get('pnl') or 0) for t in active)
+    session_active_pnl = sum(float(t.get('pnl') or 0) for t in session_active)
+    session_realized_pnl = sum(float(r.get('realized_pnl') or r.get('realizedPnl') or 0) for r in session_history_rows)
+
+    live_modes = []
+    weak_modes = []
+    for name, opt in optimizers.items():
+        _, reason, tier = live_trade_permission(name, opt, perf.get(name))
+        item = {
+            'strategy': name,
+            'label': strategy_profile(name)['label'],
+            'tier': tier,
+            'reason': reason,
+            'pf': opt.get('profit_factor'),
+            'expectancy': opt.get('expectancy'),
+            'max_margin': opt.get('max_margin'),
+            'state': opt.get('state'),
+        }
+        if tier in ['live_core', 'live_calibration']:
+            live_modes.append(item)
+        else:
+            weak_modes.append(item)
+
+    live_active = [t for t in active if t.get('source') == 'okx_live']
+    tracked_active = [t for t in active if t.get('source') != 'okx_live']
+
+    verdict = 'Monitoring active positions.'
+    if orphan_positions and not active:
+        verdict = 'Only orphan positions remain; optimization can proceed while close monitoring stays enabled.'
+    elif active_pnl > 0 and live_modes:
+        verdict = 'Live positions are positive and tradeable modes remain enabled.'
+    elif live_modes:
+        verdict = 'Live positions remain open; keep monitoring protection and mode quality.'
+    if not active and potentials:
+        verdict = 'No blocking active positions; potential setups are waiting.'
+    elif not active and not potentials and not orphan_positions:
+        verdict = 'No blocking active or potential trades at the moment.'
+
+    return {
+        'server_time': datetime.datetime.now().isoformat(timespec='seconds'),
+        'verdict': verdict,
+        'account': state.account_data,
+        'capital': capital_snapshot(),
+        'active_count': len(active),
+        'orphan_count': len(orphan_positions),
+        'potential_count': len(potentials),
+        'active_pnl': round(active_pnl, 4),
+        'session_active_count': len(session_active),
+        'session_potential_count': len(session_potentials),
+        'session_active_pnl': round(session_active_pnl, 4),
+        'session_realized_pnl': round(session_realized_pnl, 4),
+        'session_started_at': config.SESSION_STARTED_AT,
+        'live_modes': live_modes,
+        'weak_modes': weak_modes,
+        'positions': [watch_item(t) for t in live_active[:8]],
+        'tracked_positions': [watch_item(t) for t in tracked_active[:8]],
+        'orphan_positions': [watch_item(t) for t in orphan_positions[:8]],
+        'training_cycle': training_cycle,
+        'protection_rule': 'Protect at 0.25R, tighten near 0.55R, trail winners, and keep orphan close orders under watch.',
     }
 
 def infer_exit_reason(trade, close_price):
@@ -776,4 +1228,3 @@ def infer_exit_reason(trade, close_price):
             return 'take_profit'
             
     return 'manual'
-
