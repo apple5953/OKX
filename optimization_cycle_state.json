@@ -1,9 +1,0 @@
-{
-    "generation":  "execution-safety-v8-20260701",
-    "last_evaluated_trade_count":  0,
-    "completed_cycles":  0,
-    "consecutive_positive_cycles":  0,
-    "last_checked_at":  "2026-07-05T18:25:51+08:00",
-    "mode":  "monitoring_only",
-    "notes":  "Monitoring only. 2026-07-05T18:25:51+08:00 check shows `/api/report` still returning active holdings (`active_count=10`); positions remain unconfirmed for protection in the current report, so no restart, parameter change, or cycle audit was made."
-}

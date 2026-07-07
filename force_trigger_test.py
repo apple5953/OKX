@@ -2,6 +2,7 @@ import ccxt
 import json
 import uuid
 import datetime
+from pathlib import Path
 
 # OKX API configuration (Sandbox/Demo mode)
 okx = ccxt.okx({
@@ -106,7 +107,8 @@ for config in test_configs:
 
 # Save the active trades so server reads them instantly
 try:
-    with open('active_trades.json', 'w', encoding='utf-8') as f:
+    trade_file = str(Path(__file__).resolve().parent / 'active_trades_macmini_01.json')
+    with open(trade_file, 'w', encoding='utf-8') as f:
         json.dump(active_trades, f)
     print("Database sync completed. 4 forced trades are active.")
 except Exception as e:

@@ -1,9 +1,12 @@
 import os
 import glob
 import json
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
 
 # 1. Merge all journal files
-all_journals = glob.glob('journal_macmini_*.json')
+all_journals = glob.glob(str(BASE_DIR / 'journal_macmini_*.json'))
 global_journal = []
 for j_file in all_journals:
     try:
@@ -17,11 +20,13 @@ for j_file in all_journals:
 print(f"Total merged global trades: {len(global_journal)}")
 
 # 2. Temporarily rename global_optimizer.json to bypass cache
-has_old = os.path.exists('global_optimizer.json')
+optimizer_path = BASE_DIR / 'global_optimizer.json'
+has_old = optimizer_path.exists()
 if has_old:
-    if os.path.exists('global_optimizer.json.tmp'):
-        os.remove('global_optimizer.json.tmp')
-    os.rename('global_optimizer.json', 'global_optimizer.json.tmp')
+    tmp_path = BASE_DIR / 'global_optimizer.json.tmp'
+    if tmp_path.exists():
+        tmp_path.unlink()
+    optimizer_path.rename(tmp_path)
 
 try:
     from server_core import state, strategies
@@ -35,10 +40,11 @@ try:
         print(f"[{name}] Optimized: {opt}")
 
     # Write global parameters
-    with open('global_optimizer.json', 'w', encoding='utf-8') as f:
+    with open(optimizer_path, 'w', encoding='utf-8') as f:
         json.dump(global_optimizer, f, indent=4, ensure_ascii=False)
     print("global_optimizer.json successfully generated.")
 finally:
     # Cleanup temp file
-    if os.path.exists('global_optimizer.json.tmp'):
-        os.remove('global_optimizer.json.tmp')
+    tmp_path = BASE_DIR / 'global_optimizer.json.tmp'
+    if tmp_path.exists():
+        tmp_path.unlink()

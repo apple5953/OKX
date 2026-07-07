@@ -167,10 +167,54 @@ function directionLabel(value) {
     return zhText(value);
 }
 
+function protectionLooksAlreadyClosed(trade) {
+    const raw = String(trade?.protection_error || '').toLowerCase();
+    const exitReason = String(trade?.exit_reason || '').toLowerCase();
+    return (
+        raw.includes('51169')
+        || raw.includes('no positions in this direction')
+        || raw.includes('already closed')
+        || raw.includes('does not exist')
+        || exitReason.includes('position_missing')
+    );
+}
+
+function protectionLabelV2(trade) {
+    const status = String(trade?.protection_status || '').toLowerCase();
+    const stage = String(trade?.trailing_stage || '').toLowerCase();
+    const errorText = zhReason(trade?.protection_error);
+    const checks = Number(trade?.missing_protection_checks || 0);
+
+    if (protectionLooksAlreadyClosed(trade)) {
+        return '保護單未回報，但倉位已不存在';
+    }
+    if (status === 'confirmed' && stage === 'protection_failed') {
+        return '保護單已確認，先前同步異常已自動收斂';
+    }
+    if (status === 'confirmed') return '保護單已確認';
+    if (status === 'pending' || status === 'unconfirmed') {
+        return checks > 0
+            ? `保護單同步中，已檢查 ${checks} 次`
+            : '保護單同步中';
+    }
+    if (status === 'failed' || stage === 'protection_failed') {
+        return errorText && errorText !== text.ready
+            ? `保護單未確認：${errorText}`
+            : '保護單未確認：交易所尚未回報對應保護單';
+    }
+    if (status === 'emergency_close_submitted') return '保護單異常，已送出緊急平倉';
+    return errorText && errorText !== text.ready
+        ? `保護單注意：${errorText}`
+        : '保護單狀態正常';
+}
+
 function protectionLabel(trade) {
     const status = String(trade?.protection_status || '').toLowerCase();
     const stage = String(trade?.trailing_stage || '').toLowerCase();
     const errorText = zhReason(trade?.protection_error);
+    if (protectionLooksAlreadyClosed(trade)) {
+        return '保護單未回報，但倉位已不存在';
+    }
     if (status === 'confirmed' && stage === 'protection_failed') {
         return '止盈止損已確認，但階段仍顯示失敗，正在同步修正';
     }
@@ -952,7 +996,7 @@ function renderTrades() {
         const shownNotional = isActive ? trade.notional : trade.planned_notional;
         const shownLeverage = isActive ? trade.leverage : trade.planned_leverage;
         const protectionFailed = trade.protection_status === 'failed' || trade.trailing_stage === 'protection_failed';
-        const protectionText = protectionLabel(trade);
+        const protectionText = protectionLabelV2(trade);
 
         let stageBadge = '';
         if (trade.trailing_stage === 'trailing') stageBadge = '<span class="stage-badge running">\u5954\u8dd1\u4e2d</span>';

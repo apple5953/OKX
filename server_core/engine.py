@@ -64,6 +64,48 @@ def close_orphan_trade_record(trade, reason='exchange_position_missing'):
 def normalize_symbol_key(symbol):
     return str(symbol or '').upper().replace('/', '').replace(':USDT', '').replace('-USDT-SWAP', 'USDT')
 
+def orphan_bypass_symbol(inst_id):
+    return str(inst_id or '').upper() in {s.upper() for s in config.ORPHAN_BYPASS_SYMBOLS}
+
+def annotate_orphan_positions(records):
+    if not config.ORPHAN_BYPASS_ENABLED:
+        return records
+
+    for record in records:
+        inst_id = record.get('instId') or (record.get('info') or {}).get('instId') or record.get('symbol')
+        if not orphan_bypass_symbol(inst_id):
+            record['orphan_bypass'] = False
+            continue
+        try:
+            orders = okx.fetch_open_orders(record.get('symbol'))
+            symbol_orders = [o for o in orders if (o.get('symbol') or '') == record.get('symbol')]
+            reduce_only = bool(symbol_orders) and all(bool(o.get('reduceOnly')) for o in symbol_orders)
+            book = okx.fetch_order_book(record.get('symbol'), limit=config.ORPHAN_ORDERBOOK_LIMIT)
+            asks = book.get('asks') or []
+            with state.orphan_position_lock:
+                tracker = state.orphan_position_state.setdefault(inst_id, {'askless_count': 0})
+                tracker['askless_count'] = tracker['askless_count'] + 1 if not asks else 0
+                tracker['last_checked_at'] = datetime.datetime.now(datetime.UTC).isoformat()
+                tracker['last_open_order_count'] = len(symbol_orders)
+                tracker['last_reduce_only_only'] = reduce_only
+                tracker['last_asks_empty'] = not asks
+                askless_count = tracker['askless_count']
+            is_orphan = (
+                reduce_only
+                and not asks
+                and askless_count >= config.ORPHAN_ASKLESS_CONFIRMATIONS
+            )
+            record['orphan_bypass'] = is_orphan
+            if is_orphan:
+                record['non_blocking_active'] = True
+                record['orphan_reason'] = (
+                    f"orphan bypass: asks empty for {askless_count} checks and only reduce-only close orders remain"
+                )
+        except Exception as exc:
+            record['orphan_bypass'] = False
+            record['orphan_error'] = str(exc)
+    return records
+
 def reserve_symbol_for_entry(symbol):
     key = normalize_symbol_key(symbol)
     with state.execution_state_lock:
@@ -270,6 +312,7 @@ def build_live_trade_snapshot(tracked_records=None, live_positions=None, include
                 merged.append(overlay_live_position_metadata(pos, fake_tracked))
             else:
                 merged.append(overlay_live_position_metadata(pos, None))
+    merged = annotate_orphan_positions(merged)
     if include_potentials:
         merged.extend([dict(t) for t in state.potential_signals if t.get('symbol') and t.get('status') != 'active'])
     return merged

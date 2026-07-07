@@ -212,7 +212,7 @@ class StrategyV6Tests(unittest.TestCase):
             'side': 'buy',
             'algoId': 'tp-parent',
             'tpOrdPx': '1600',
-            'linkedAlgoOrd': {'algoId': 'linked-sl', 'slTriggerPx': '1620'},
+            'linkedAlgoOrd': {'algoId': 'linked-sl', 'slTriggerPx': '1620', 'tpTriggerPx': '1588', 'tpOrdPx': '1588'},
         }]
         result = server.protective_algo_targets(
             algos, 'ETH-USDT-SWAP', 'buy', {'tp-parent'}
@@ -220,6 +220,7 @@ class StrategyV6Tests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]['algoId'], 'linked-sl')
         self.assertTrue(result[0]['tp_limit_linked'])
+        self.assertEqual(result[0]['tpTriggerPx'], '1588')
 
     def test_algo_amend_checks_item_level_error(self):
         failed, code, message = server.okx_algo_amend_error({

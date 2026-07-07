@@ -141,9 +141,12 @@ def emergency_close_unprotected(symbol, direction, filled_size):
         })
         info = (result or {}).get('info') or {}
         data = info.get('data') or [{}]
-        s_code = str((data[0] if data else {}).get('sCode') or '0')
+        row = data[0] if data else {}
+        s_code = str(row.get('sCode') or info.get('sCode') or result.get('code') or '0')
+        s_msg = str(row.get('sMsg') or info.get('sMsg') or result.get('msg') or '')
         if s_code not in ['', '0']:
-            s_msg = (data[0] if data else {}).get('sMsg', '')
+            if '51169' in s_code or '51169' in s_msg or 'no positions in this direction' in s_msg.lower():
+                return False, '51169', 'Position already closed or does not exist'
             return False, s_code, s_msg
         return True, '0', ''
     except Exception as e:
@@ -190,6 +193,8 @@ def protective_algo_targets(all_algos, inst_id, expected_side, tracked_algo_ids=
                 'instId': algo.get('instId'),
                 'algoId': linked_id,
                 'slTriggerPx': linked.get('slTriggerPx') or algo.get('slTriggerPx'),
+                'tpTriggerPx': linked.get('tpTriggerPx') or algo.get('tpTriggerPx'),
+                'tpOrdPx': linked.get('tpOrdPx') or algo.get('tpOrdPx'),
                 'tp_limit_linked': True,
                 'parentAlgoId': algo_id,
             }

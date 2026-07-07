@@ -17,13 +17,14 @@ import os
 import uuid
 import sys
 import datetime
+from pathlib import Path
 
 # FORCE UTF-8 Encoding to prevent crash when printing emojis on Windows cp950 console
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Load existing state
-TRADE_FILE = 'active_trades.json'
-JOURNAL_FILE = 'trade_journal.json'
+TRADE_FILE = str(Path(__file__).resolve().parent / 'active_trades_macmini_01.json')
+JOURNAL_FILE = str(Path(__file__).resolve().parent / 'journal_macmini_01.json')
 active_trades = []
 trade_journal = []
 

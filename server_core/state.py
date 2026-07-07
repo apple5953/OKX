@@ -22,6 +22,8 @@ positions_snapshot_cache = {
     'normalized': [],
 }
 positions_snapshot_lock = threading.Lock()
+orphan_position_state = {}
+orphan_position_lock = threading.Lock()
 
 account_snapshot_cache = {
     'fetched_at': 0.0,

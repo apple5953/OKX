@@ -193,6 +193,28 @@ def lifecycle_trade_for_history(record):
             distance = abs(trade_open_ms - opened_ms) if trade_open_ms and opened_ms else 0
             manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
             candidates.append((manual_rank, distance, trade_open_ms, trade))
+    if not candidates and inst_id and direction:
+        # Broader recovery path: if the exact posId match is missing, try to
+        # recover the lifecycle from the same instrument/direction pair near the
+        # recorded open time instead of defaulting to Manual immediately.
+        for trade in state.trade_journal + state.active_trades:
+            trade_inst = str(trade.get('instId') or '')
+            trade_direction = str(trade.get('direction') or '').lower()
+            if trade_inst and inst_id and trade_inst != inst_id:
+                continue
+            if trade_direction and direction and trade_direction != direction:
+                continue
+            trade_open_ms = trade_open_timestamp_ms(trade)
+            if not trade_open_ms:
+                continue
+            if opened_ms:
+                distance = abs(trade_open_ms - opened_ms)
+                if distance > config.LIFECYCLE_OPEN_TOLERANCE_MS * 4:
+                    continue
+            else:
+                distance = 0
+            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
+            candidates.append((manual_rank, distance, trade_open_ms, trade))
     if not candidates:
         return None
     return min(candidates, key=lambda row: (row[0], row[1], -row[2]))[3]
