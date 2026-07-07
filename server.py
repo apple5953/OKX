@@ -87,12 +87,11 @@ if __name__ == '__main__':
     # Initialize scanner symbols
     state.global_symbols, state.global_symbol_categories = okx_client.get_top_symbols_and_categories()
     
-    # Try to acquire instance lock
+    # Try to acquire instance lock (soft guard — won't kill process if already occupied)
     try:
         utils.acquire_instance_guard(5017)
     except Exception as e:
-        print(f"Another instance is already running on port 5017: {e}")
-        sys.exit(1)
+        print(f"[Warning] Instance guard port 5017 unavailable ({e}); continuing anyway (managed by auto_restart.py)")
         
     def update_symbols_loop():
         while True:
@@ -108,6 +107,7 @@ if __name__ == '__main__':
                 
     threading.Thread(target=update_symbols_loop, daemon=True).start()
     threading.Thread(target=engine.background_sync_loop, daemon=True).start()
+    threading.Thread(target=strategies.training_loop, kwargs={'interval_seconds': 600}, daemon=True).start()
     
     # Start 4 Strategy Threads with High-Win Rate Trend-Following Parameters
     t1 = threading.Thread(target=engine.run_strategy, args=('MacroSniper', '15m', 0.14, 0.012, '1h', 0.45), daemon=True)
