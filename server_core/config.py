@@ -104,35 +104,35 @@ STRATEGY_PROFILES = {
         'label': 'Macro Sniper',
         'role': '1h/4h trend rider. Fewer entries, larger runner target.',
         'margin_mult': 1.10,
-        'sl_atr': 1.4,         # 收緊止損，提高盈虧比
-        'tp_atr': 6.5,         # 放大波段目標
-        'min_rr': 1.50,        # 追求高盈虧比
-        'be_threshold': 0.20,  # 留有波動空間
-        'lock_threshold': 0.40,
-        'trail_buffer': 0.12,
-        'remove_tp_at': 0.50,  # 利潤奔跑
+        'sl_atr': 1.2,         # 稍收緊，1.5% ATR -> 1.8%
+        'tp_atr': 3.5,         # 下調，1.5% ATR -> 5.2% 止盈
+        'min_rr': 1.40,        # 務實盈虧比
+        'be_threshold': 0.16,
+        'lock_threshold': 0.35,
+        'trail_buffer': 0.10,
+        'remove_tp_at': 0.50,
     },
     'MeanReversion': {
         'label': 'Mean Reversion',
         'role': 'Fast oversold/overbought repair. Smaller target, fast lock.',
         'margin_mult': 0.95,
-        'sl_atr': 0.85,        # 均值回歸一旦破位即認錯
-        'tp_atr': 1.8,         # 快速止盈
-        'min_rr': 1.05,        # 保持健康盈虧比
-        'be_threshold': 0.05,  # 極速拉成本防回撤
-        'lock_threshold': 0.18, # 儘早鎖定利潤
-        'trail_buffer': 0.06,
-        'remove_tp_at': 0.95,  # 均值回歸不追求無限奔跑
+        'sl_atr': 0.8,         # 快速認錯，1.5% ATR -> 1.2%
+        'tp_atr': 1.4,         # 均值回歸快進快出，1.5% ATR -> 2.1% 止盈
+        'min_rr': 1.05,
+        'be_threshold': 0.05,
+        'lock_threshold': 0.15,
+        'trail_buffer': 0.05,
+        'remove_tp_at': 0.95,
     },
     'Contrarian': {
         'label': 'Contrarian',
         'role': 'Extreme reversal hunter. Wider stop, needs exhaustion proof.',
         'margin_mult': 0.85,
-        'sl_atr': 1.2,         # 配合極端 RSI 進場，止損可以收窄
-        'tp_atr': 3.8,         # 抓波段大拐點
-        'min_rr': 1.50,
+        'sl_atr': 1.1,         # 配合精準極端 RSI, 1.5% ATR -> 1.65%
+        'tp_atr': 2.6,         # 反彈波段，1.5% ATR -> 3.9% 止盈
+        'min_rr': 1.30,
         'be_threshold': 0.10,
-        'lock_threshold': 0.30,
+        'lock_threshold': 0.28,
         'trail_buffer': 0.08,
         'remove_tp_at': 0.60,
     },
@@ -140,13 +140,13 @@ STRATEGY_PROFILES = {
         'label': 'Squeeze Hunter',
         'role': 'Volatility expansion hunter. Requires fresh squeeze release and confirmed breakout.',
         'margin_mult': 1.00,
-        'sl_atr': 1.2,         # 突破型態不需要太寬的止損
-        'tp_atr': 4.5,         # 追突破要吃大單邊
-        'min_rr': 1.30,
-        'be_threshold': 0.12,
-        'lock_threshold': 0.26,
+        'sl_atr': 1.1,         # 突破不回頭，1.5% ATR -> 1.65%
+        'tp_atr': 3.0,         # 追突破吃波段，1.5% ATR -> 4.5% 止盈
+        'min_rr': 1.25,
+        'be_threshold': 0.10,
+        'lock_threshold': 0.24,
         'trail_buffer': 0.08,
-        'remove_tp_at': 0.45,  # 儘早撤 TP 讓大單邊奔跑
+        'remove_tp_at': 0.45,
     },
 }
 
@@ -216,24 +216,24 @@ CATEGORY_PROFILES = {
 
 EXIT_STATE_LIMITS = {
     'MacroSniper': {
-        'explore': {'sl_cap': 0.0250, 'tp_cap': 0.0950, 'rr_floor': 1.65},
-        'train': {'sl_cap': 0.0220, 'tp_cap': 0.0800, 'rr_floor': 1.50},
-        'recover': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.35},
+        'explore': {'sl_cap': 0.0250, 'tp_cap': 0.0600, 'rr_floor': 1.45},
+        'train': {'sl_cap': 0.0220, 'tp_cap': 0.0500, 'rr_floor': 1.40},
+        'recover': {'sl_cap': 0.0180, 'tp_cap': 0.0450, 'rr_floor': 1.30},
     },
     'MeanReversion': {
-        'explore': {'sl_cap': 0.0180, 'tp_cap': 0.0650, 'rr_floor': 1.25},
-        'train': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.15},
-        'recover': {'sl_cap': 0.0140, 'tp_cap': 0.0450, 'rr_floor': 1.05},
+        'explore': {'sl_cap': 0.0180, 'tp_cap': 0.0300, 'rr_floor': 1.15},
+        'train': {'sl_cap': 0.0160, 'tp_cap': 0.0250, 'rr_floor': 1.10},
+        'recover': {'sl_cap': 0.0140, 'tp_cap': 0.0200, 'rr_floor': 1.05},
     },
     'Contrarian': {
-        'explore': {'sl_cap': 0.0220, 'tp_cap': 0.0750, 'rr_floor': 1.60},
-        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0600, 'rr_floor': 1.45},
-        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0500, 'rr_floor': 1.30},
+        'explore': {'sl_cap': 0.0220, 'tp_cap': 0.0450, 'rr_floor': 1.35},
+        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0400, 'rr_floor': 1.30},
+        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0350, 'rr_floor': 1.20},
     },
     'SqueezeHunter': {
-        'explore': {'sl_cap': 0.0200, 'tp_cap': 0.0700, 'rr_floor': 1.50},
-        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0550, 'rr_floor': 1.35},
-        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0450, 'rr_floor': 1.20},
+        'explore': {'sl_cap': 0.0200, 'tp_cap': 0.0500, 'rr_floor': 1.30},
+        'train': {'sl_cap': 0.0180, 'tp_cap': 0.0450, 'rr_floor': 1.25},
+        'recover': {'sl_cap': 0.0160, 'tp_cap': 0.0400, 'rr_floor': 1.15},
     },
 }
 
