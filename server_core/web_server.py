@@ -180,3 +180,30 @@ def api_git_pull():
 
     except Exception as e:
         return jsonify({'success': False, 'message': f"同步過程中出現異常: {str(e)}"}), 500
+
+@app.route('/api/reset-optimizer', methods=['POST'])
+def api_reset_optimizer():
+    try:
+        import shutil
+        from pathlib import Path
+        
+        opt_path = Path(config.PROJECT_DIR) / 'global_optimizer.json'
+        state_path = Path(config.PROJECT_DIR) / 'optimization_cycle_state.json'
+        
+        # 1. 刪除優化器和周期狀態文件 (直接重製數值)
+        if opt_path.exists():
+            opt_path.unlink()
+        if state_path.exists():
+            state_path.unlink()
+            
+        # 2. 清空記憶體緩存日誌與狀態，讓機器人重新冷啟動評估
+        state.ml_evolution_logs.append("[🔄 系統重置] 已重置所有模式的自適應優化數值！模式已恢復探索狀態 (Explore)。")
+        
+        # 3. 觸發一次強制的訓練週期重新生成初始文件
+        from .strategies import run_training_cycle
+        run_training_cycle(force_history=True)
+        
+        return jsonify({'success': True, 'message': '所有模式數值已重製成功，自適應優化已重新初始化為探索狀態。'}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'重製失敗: {str(e)}'}), 500
+

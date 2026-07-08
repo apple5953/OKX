@@ -1325,3 +1325,44 @@ async function syncGithub() {
         }
     }
 }
+
+async function resetOptimizer() {
+    if (!confirm('確定要直接重製所有模式的自適應優化數值嗎？此操作將會清除當前優化器的歷史調整參數，使所有策略重置為基礎的「探索 (Explore)」狀態。')) {
+        return;
+    }
+
+    const btn = document.getElementById('reset-opt-btn');
+    if (!btn) return;
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.innerHTML = '<span>⏳ 正在重製中...</span>';
+
+    try {
+        const response = await fetch('/api/reset-optimizer', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            alert(data.message);
+            location.reload();
+        } else {
+            alert(`重製失敗: ${data.message || '未知錯誤'}`);
+        }
+    } catch (err) {
+        alert(`無法連接到伺服器: ${err.message}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.innerHTML = originalText;
+        }
+    }
+}
+

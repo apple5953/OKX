@@ -895,24 +895,73 @@ def evaluate_mode_gate(strategy_name, direction, rsi, trends, in_prz, true_rr, t
     symbol = symbol or ''
     is_major = any(kw in symbol.upper() for kw in ['BTC', 'ETH', 'SOL'])
 
+    if df.empty or len(df) < 20:
+        return False, 'gate: insufficient candle history'
+
+    # 計算基本指標以便在過濾中使用
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    
+    # 1. 計算 ADX 趨勢強度
+    adx_series = calculate_adx(df)
+    adx = adx_series.iloc[-1] if not adx_series.empty else 20.0
+    
+    # 2. 計算成交量相對於前 20 根均值的倍數
+    avg_vol = df['volume'].tail(20).mean()
+    vol_ratio = (last_candle['volume'] / avg_vol) if avg_vol > 0 else 1.0
+
     # 1. MacroSniper: 大週期趨勢狙擊
     if strategy_name == 'MacroSniper':
+        # 核心優化：必須處於「強趨勢」市場 (ADX > 25 且 ADX 處於上升通道)
+        if adx < 25:
+            return False, f'MacroSniper gate: ADX trend strength {adx:.1f} < 25 (ranging market)'
+        
+        adx_prev = adx_series.iloc[-2] if len(adx_series) > 1 else 20.0
+        if adx < adx_prev:
+            return False, 'MacroSniper gate: ADX trend momentum is declining'
+
         # 嚴格趨勢共振：大週期和小週期必須方向一致
         if direction == 'bullish' and not (trends.get('1h') == 'bull' and trends.get('4h') == 'bull'):
             return False, 'MacroSniper gate: trend resonance not bullish'
         if direction == 'bearish' and not (trends.get('1h') == 'bear' and trends.get('4h') == 'bear'):
             return False, 'MacroSniper gate: trend resonance not bearish'
 
-    # 2. MeanReversion: 快速均值回歸 (只在震盪市或超短期背離進場)
+    # 2. MeanReversion: 快速均值回歸
     if strategy_name == 'MeanReversion':
+        # 核心優化：拒絕在「超強趨勢」(ADX > 32) 中逆勢接飛刀
+        if adx > 32:
+            return False, f'MeanReversion gate: ADX trend {adx:.1f} is too strong to fight (risk of trend run)'
+
         # 防止在強大單邊趨勢中接飛刀：大週期 4h 若是強勢，不允許逆大勢做均值回歸
         if direction == 'bullish' and trends.get('4h') == 'bear':
             return False, 'MeanReversion gate: cannot buy against strong 4H bear trend'
         if direction == 'bearish' and trends.get('4h') == 'bull':
             return False, 'MeanReversion gate: cannot sell against strong 4H bull trend'
+            
+        # 增加短線超買超賣過濾 (防止提前進場)
+        if direction == 'bullish' and rsi > 38:
+            return False, f'MeanReversion gate: RSI {rsi:.1f} not low enough (needs < 38)'
+        if direction == 'bearish' and rsi < 62:
+            return False, f'MeanReversion gate: RSI {rsi:.1f} not high enough (needs > 62)'
 
-    # 3. Contrarian: 拐點反轉 (必須是真正的超買超賣，拒絕中庸價格)
+    # 3. Contrarian: 拐點反轉
     if strategy_name == 'Contrarian':
+        # 核心優化：必須有背離訊號 (div_ok) 或 流動性掠奪跡象 (sweep_ok / 長影線針頭)
+        has_reversal_wick = False
+        avg_body = abs(df['close'].tail(10) - df['open'].tail(10)).mean()
+        
+        if direction == 'bullish':
+            lower_wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
+            if lower_wick > avg_body * 1.5:  # 長下影線
+                has_reversal_wick = True
+        else:
+            upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+            if upper_wick > avg_body * 1.5:  # 長上影線
+                has_reversal_wick = True
+
+        if not (div_ok or sweep_ok or has_reversal_wick):
+            return False, 'Contrarian gate: lacks divergence, liquidity sweep, or reversal wick signature'
+
         # 嚴格收緊 RSI 限制，非極端不摸頂底
         if direction == 'bullish' and rsi > 28:
             return False, f'Contrarian gate: RSI {rsi:.1f} too high for bullish reversal (needs < 28)'
@@ -921,6 +970,10 @@ def evaluate_mode_gate(strategy_name, direction, rsi, trends, in_prz, true_rr, t
 
     # 4. SqueezeHunter: 擠壓突破
     if strategy_name == 'SqueezeHunter':
+        # 核心優化：突破必須放量 (成交量大於均線 1.5 倍) 以證明非虛假突破
+        if vol_ratio < 1.50:
+            return False, f'SqueezeHunter gate: volume breakout ratio {vol_ratio:.2f}x < 1.50x (weak breakout)'
+
         # 必須有歷史擠壓跡象 (8根K線內有擠壓)，且當前寬度開始放大 (突破發散)
         if df.empty or len(df) < 8:
             return False, 'SqueezeHunter gate: insufficient data'
