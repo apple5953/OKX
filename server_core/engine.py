@@ -1223,6 +1223,58 @@ def background_sync_loop():
 
                 for t in state.active_trades:
                     if t['status'] == 'active':
+                        raw_strat = t.get('strategy', 'SqueezeHunter')
+                        
+                        # ⏱️ MeanReversion 40 分鐘時間止損強平
+                        if raw_strat == 'MeanReversion':
+                            opened_ms = t.get('uTime') or t.get('timestamp')
+                            if opened_ms:
+                                opened_sec = float(opened_ms) / 1000.0
+                                if time.time() - opened_sec > 40 * 60:
+                                    print(f"[⏱️ MR TIME LIMIT] {t['symbol']} 均值回歸持倉超過 40 分鐘，強制市價平倉退出。")
+                                    try:
+                                        ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
+                                        close_size = as_float(t.get('filled_contracts'))
+                                        ok, ec, em = emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
+                                        if ok or okx_position_not_found_error(ec, em):
+                                            close_orphan_trade_record(t, 'time_based_timeout')
+                                            continue
+                                    except Exception as err:
+                                        print(f"[⏱️ MR TIME LIMIT ERROR] 平倉失敗: {err}")
+
+                        # 🎯 SqueezeHunter 1.0R 多段止盈 50%
+                        if raw_strat == 'SqueezeHunter' and not t.get('half_tp_done') and as_float(t.get('entry')) > 0 and as_float(t.get('sl')) > 0:
+                            risk_dist = abs(as_float(t.get('entry')) - as_float(t.get('sl')))
+                            favorable_move = (as_float(t.get('current')) - as_float(t.get('entry'))) if t['direction'] == 'long' else (as_float(t.get('entry')) - as_float(t.get('current')))
+                            r_now = favorable_move / risk_dist if risk_dist > 0 else 0
+                            if r_now >= 1.0:
+                                print(f"[🎯 SH MULTI-TP] {t['symbol']} 收益達 1.0R，強制市價平倉 50% 鎖定利潤。")
+                                try:
+                                    ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
+                                    close_size = round(as_float(t.get('filled_contracts')) / 2.0, 4)
+                                    if close_size > 0:
+                                        ok, ec, em = emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
+                                        if ok:
+                                            t['filled_contracts'] = as_float(t.get('filled_contracts')) - close_size
+                                            t['half_tp_done'] = True
+                                            print(f"[🎯 SH MULTI-TP SUCCESS] {t['symbol']} 平倉半數完成。剩餘合約: {t['filled_contracts']}")
+                                            if t.get('protection_order_id'):
+                                                try:
+                                                    okx.cancel_order(t.get('protection_order_id'), ccxt_sym)
+                                                except Exception:
+                                                    pass
+                                            plan_half = {'tp1': t['tp1'], 'sl': t['sl']}
+                                            new_prot = place_exact_fill_protection(
+                                                ccxt_sym, t['direction'], t['filled_contracts'], plan_half, t.get('clOrdId', 'HALF')
+                                            )
+                                            t['protection_order_id'] = new_prot.get('id')
+                                            t['protection_order_ids'] = [str(new_prot.get('id'))]
+                                        elif okx_position_not_found_error(ec, em):
+                                            close_orphan_trade_record(t, 'half_tp_already_closed')
+                                            continue
+                                except Exception as err:
+                                    print(f"[🎯 SH MULTI-TP ERROR] 執行多段止盈失敗: {err}")
+
                         expected_inst_id = t.get('instId') or (normalize_symbol_key(t['symbol']).replace('USDT', '') + "-USDT-SWAP")
                         expected_side = 'sell' if t['direction'] == 'long' else 'buy'
                         tracked_algo_ids = set(str(x) for x in (t.get('protection_order_ids') or []) if x)
@@ -1380,7 +1432,10 @@ def background_sync_loop():
                                 t['highest_pnl'] = round(max(float(t.get('highest_pnl') or 0), float(t.get('pnl') or 0)), 4)
 
                                 lock_r = None
-                                if highest_r >= config.MFE_RUNNER_R:
+                                if raw_strat == 'MacroSniper' and highest_r >= 0.8:
+                                    lock_r = 0.3
+                                    desired_stage = 'macrosniper_profit_lock_0.3R'
+                                elif highest_r >= config.MFE_RUNNER_R:
                                     lock_r = max(config.MFE_LOCK_FRACTION, highest_r - config.MFE_TRAIL_GIVEBACK_R)
                                     desired_stage = 'mfe_runner_lock'
                                 elif highest_r >= config.MFE_LOCK_R:
