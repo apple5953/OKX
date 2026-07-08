@@ -134,3 +134,49 @@ def api_intelligence():
         },
         'logs': state.ml_evolution_logs
     }))
+
+@app.route('/api/git-pull', methods=['POST'])
+def api_git_pull():
+    import subprocess
+    import sys
+    import os
+    import threading
+
+    try:
+        # 執行 git pull
+        result = subprocess.run(
+            ['git', 'pull', 'origin', 'main'],
+            capture_output=True,
+            text=True,
+            cwd=config.PROJECT_DIR,
+            encoding='utf-8',
+            errors='ignore'
+        )
+        
+        output = result.stdout or ""
+        error = result.stderr or ""
+        
+        if result.returncode != 0:
+            return jsonify({'success': False, 'message': f"Git pull 失敗: {error}"}), 500
+
+        # 檢查是否真的有拉取更新
+        if "Already up to date" in output or "已經是最新的" in output:
+            return jsonify({'success': True, 'updated': False, 'message': "機器人代碼已是最新版本，無需更新。"}), 200
+
+        # 如果真的有代碼更新，啟動一個延時背景線程以重啟服務
+        def restart_server():
+            time.sleep(2)
+            print("[🔄 GIT UPDATE] 檢測到 GITHUB 代碼更新，正在重啟服務以加載新版本...")
+            os._exit(0)  # 觸發 auto_restart.py 重啟
+
+        import time
+        threading.Thread(target=restart_server, daemon=True).start()
+        
+        return jsonify({
+            'success': True,
+            'updated': True,
+            'message': "GITHUB 代碼同步成功！機器人將在 3 秒內自動完成平滑重啟以加載新版本。"
+        }), 200
+
+    except Exception as e:
+        return jsonify({'success': False, 'message': f"同步過程中出現異常: {str(e)}"}), 500

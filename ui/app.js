@@ -1282,3 +1282,46 @@ function renderEngineHeartbeat() {
 }
 
 // --- SECTION REMOVED TRIPLICATES ---
+
+async function syncGithub() {
+    const btn = document.getElementById('git-pull-btn');
+    if (!btn) return;
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.innerHTML = '<span>⏳ 正在同步 GitHub...</span>';
+
+    try {
+        const response = await fetch('/api/git-pull', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+            alert(data.message);
+            if (data.updated) {
+                // 如果真的更新了，等待 3 秒讓 Flask 重啟完畢，然後自動刷新瀏覽器
+                btn.innerHTML = '<span>🔄 機器人重啟中...</span>';
+                setTimeout(() => {
+                    location.reload();
+                }, 3000);
+                return;
+            }
+        } else {
+            alert(`同步失敗: ${data.message || '未知錯誤'}`);
+        }
+    } catch (err) {
+        alert(`無法連接到伺服器: ${err.message}`);
+    } finally {
+        if (btn && btn.disabled && btn.innerHTML !== '<span>🔄 機器人重啟中...</span>') {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.innerHTML = originalText;
+        }
+    }
+}
