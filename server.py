@@ -72,6 +72,8 @@ class ServerModuleWrapper(object):
             return state.trade_journal
         if name == 'reserved_symbols':
             return state.reserved_symbols
+        if name == 'realized_strategy_rows':
+            return okx_client.realized_strategy_rows
         return getattr(self.wrapped, name)
     def __setattr__(self, name, value):
         if name == 'active_trades':

@@ -87,8 +87,17 @@ def recent_strategy_stats(strategy_name, category=None, limit=40):
     return rows[:limit]
 
 def strategy_performance(strategy_name, limit=120):
-    from .okx_client import realized_strategy_rows
-    rows = realized_strategy_rows(strategy_name, limit)
+    import sys
+    realized_rows_func = None
+    if 'server' in sys.modules:
+        srv = sys.modules['server']
+        if hasattr(srv, 'realized_strategy_rows'):
+            realized_rows_func = srv.realized_strategy_rows
+    if realized_rows_func is None:
+        from .okx_client import realized_strategy_rows
+        realized_rows_func = realized_strategy_rows
+        
+    rows = realized_rows_func(strategy_name, limit)
     total_trades = len(rows)
     if total_trades == 0:
         return {

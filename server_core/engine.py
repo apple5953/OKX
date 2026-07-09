@@ -1215,15 +1215,30 @@ def background_sync_loop():
                 state.active_trades = collapse_active_records(state.active_trades)
 
                 # 3. Sync Algo Orders (TP/SL)
-                oco_res = okx.private_get_trade_orders_algo_pending({'instType':'SWAP', 'ordType': 'oco'})
-                cond_res = okx.private_get_trade_orders_algo_pending({'instType':'SWAP', 'ordType': 'conditional'})
                 all_algos = []
-                if oco_res and oco_res.get('code') == '0': all_algos.extend(oco_res.get('data', []))
-                if cond_res and cond_res.get('code') == '0': all_algos.extend(cond_res.get('data', []))
+                if not config.MOCK_MODE:
+                    try:
+                        oco_res = okx.private_get_trade_orders_algo_pending({'instType':'SWAP', 'ordType': 'oco'})
+                        cond_res = okx.private_get_trade_orders_algo_pending({'instType':'SWAP', 'ordType': 'conditional'})
+                        if oco_res and oco_res.get('code') == '0': all_algos.extend(oco_res.get('data', []))
+                        if cond_res and cond_res.get('code') == '0': all_algos.extend(cond_res.get('data', []))
+                    except Exception as algo_err:
+                        print(f"[BACKGROUND SYNC ERROR] Failed to fetch algo orders: {algo_err}")
+                        # 如果發生權限/白名單問題，自動退回到 MOCK_MODE
+                        if "PermissionDenied" in str(algo_err) or "50116" in str(algo_err) or "API Key" in str(algo_err):
+                            config.MOCK_MODE = True
+                            print("[BACKGROUND SYNC] 偵測到 OKX 拒絕訪問，自動切換至 MOCK 本地模擬模式。")
 
                 for t in state.active_trades:
                     if t['status'] == 'active':
                         raw_strat = t.get('strategy', 'SqueezeHunter')
+                        
+                        if config.MOCK_MODE:
+                            # 🟢 Mock Mode: 模擬保護狀態，直接略過所有實盤 API 同步與交易所時間止盈止損
+                            t['missing_protection_checks'] = 0
+                            t['protection_status'] = 'confirmed'
+                            t['protection_error'] = None
+                            continue
                         
                         # ⏱️ MeanReversion 40 分鐘時間止損強平
                         if raw_strat == 'MeanReversion':
@@ -1485,6 +1500,15 @@ def background_sync_loop():
                                     sl_diff_pct = abs(t['sl'] - new_sl) / t['entry']
                                     
                                     if is_better_sl and sl_diff_pct > 0.0005:
+                                        if config.MOCK_MODE:
+                                            # 🟢 Mock Mode: 本地直接更新模擬的止損價，不修改交易所
+                                            t['sl'] = round(new_sl, 6)
+                                            t['trailing_stage'] = desired_stage
+                                            t['protection_status'] = 'confirmed'
+                                            t['protection_error'] = None
+                                            print(f"[🛡️ MOCK TRAILING STOP] {t['symbol']} Mock SL moved locally to: {t['sl']} (Progress: {highest_progress*100:.1f}%)")
+                                            continue
+                                        
                                         retry_after = as_float(t.get('protection_retry_after'))
                                         if retry_after > time.time():
                                             continue

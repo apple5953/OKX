@@ -15,7 +15,26 @@ okx = ccxt.okx({
     'password': config.OKX_PASSWORD,
     'enableRateLimit': True,
 })
-okx.set_sandbox_mode(True)
+try:
+    okx.set_sandbox_mode(True)
+except Exception:
+    pass
+
+# 自動檢測是否有填寫 API Key 且連線可用，若失敗則自動切換至 MOCK 本地模擬模式
+if not config.OKX_API_KEY or config.OKX_API_KEY.startswith("YOUR_") or config.OKX_API_KEY == 'f1b9af15-e584-4911-b949-ff42168fd53c_PLACEHOLDER':
+    config.MOCK_MODE = True
+    print("[🛡️ SYSTEM CONFIG] 未設置有效 OKX API 金鑰，已自動開啟 MOCK_MODE (本地模擬交易模式)。")
+else:
+    try:
+        # 測試一次簡單的載入市場來檢驗網絡
+        okx.load_markets()
+        print("[🛡️ SYSTEM CONFIG] OKX API 網絡連線測試正常。")
+    except ccxt.PermissionDenied as pd_err:
+        config.MOCK_MODE = True
+        print(f"[🛡️ SYSTEM CONFIG] OKX 拒絕訪問 (IP 未加入白名單: {pd_err})。已自動切換至 MOCK_MODE (本地模擬交易模式)。")
+    except Exception as exc:
+        # 網絡超時或其它錯誤，非授權問題，但不影響正常運行
+        print(f"[🛡️ SYSTEM CONFIG] OKX 網絡測試非致命警報: {exc}")
 
 def sync_exchange_history(force=False):
     now = time.time()
@@ -640,6 +659,39 @@ def normalize_position_side(side):
     return 'long'
 
 def fetch_open_positions_snapshot(force=False):
+    if config.MOCK_MODE:
+        # Mock mode directly returns fallback positions derived from active_trades to bypass API permission blocks
+        fallback_positions = []
+        for trade in state.active_trades:
+            if trade.get('status') != 'active':
+                continue
+            fallback_positions.append({
+                'id': trade.get('posId') or trade.get('id') or trade.get('symbol'),
+                'posId': trade.get('posId') or trade.get('id') or trade.get('symbol'),
+                'instId': trade.get('instId') or trade.get('symbol'),
+                'symbol': trade.get('instId') or trade.get('symbol'),
+                'raw_symbol': trade.get('instId') or trade.get('symbol'),
+                'side': trade.get('direction') or 'long',
+                'posSide': trade.get('direction') or 'long',
+                'direction': trade.get('direction') or 'long',
+                'status': 'active',
+                'source': 'local_active_trade_fallback',
+                'entryPrice': as_float(trade.get('entry')),
+                'markPrice': as_float(trade.get('current') or trade.get('entry')),
+                'unrealizedPnl': as_float(trade.get('pnl')),
+                'percentage': as_float(trade.get('percentage')),
+                'leverage': trade.get('leverage'),
+                'initialMargin': as_float(trade.get('initialMargin')),
+                'notional': as_float(trade.get('notional')),
+                'liquidationPrice': as_float(trade.get('liquidationPrice')),
+                'marginRatio': as_float(trade.get('marginRatio')),
+                'contracts': as_float(trade.get('contracts') or trade.get('filled_contracts')),
+                'availPos': as_float(trade.get('contracts') or trade.get('filled_contracts')),
+                'marginMode': trade.get('marginMode'),
+                'info': dict(trade),
+            })
+        return fallback_positions
+
     now = time.monotonic()
     with state.positions_snapshot_lock:
         if (
@@ -755,6 +807,15 @@ def create_okx_balance_client():
     return client
 
 def fetch_okx_account_snapshot(force=False):
+    if config.MOCK_MODE:
+        return {
+            'totalEq': config.START_EQUITY_USDT,
+            'usdtEq': config.START_EQUITY_USDT,
+            'usdtAvail': config.START_EQUITY_USDT,
+            'source': 'mock_account_balance',
+            'synced_at': datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+
     now = time.monotonic()
     with state.account_snapshot_lock:
         cached = state.account_snapshot_cache['data']

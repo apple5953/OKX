@@ -8,6 +8,10 @@ OKX_API_KEY = 'f1b9af15-e584-4911-b949-ff42168fd53c'
 OKX_SECRET = 'A64C98D3C5E8B38A963566313BA31EF1'
 OKX_PASSWORD = '@Sweetsweet556'
 
+# 本地模擬交易模式 (MOCK_MODE): 
+# 若為 True，或 API 金鑰留空/無效時，機器人會轉為「本地虛擬開平倉」，不發送真實訂單到 OKX，專門用於無白名單權限的電腦進行訓練。
+MOCK_MODE = False
+
 BASE_MARGIN_USDT = 60.0
 STRATEGY_VERSION = 'v12'
 START_EQUITY_USDT = 5000.0
