@@ -52,6 +52,45 @@ def build_runtime_status():
         'whitelist_required': True,
     }
 
+def build_runtime_status_v2():
+    credentials_ready = bool(config.OKX_API_KEY and config.OKX_SECRET and config.OKX_PASSWORD)
+    node_name = config.NODE_NAME or '-'
+
+    if config.MOCK_MODE:
+        return {
+            'node_name': node_name,
+            'run_mode': 'mock',
+            'label': '模擬單',
+            'summary': f'模擬單｜{node_name}｜不連 OKX 實盤',
+            'tone': 'mock',
+            'detail': '目前是模擬模式，會用公開行情與本機資料訓練，不會連到 OKX 實盤下單。',
+            'credentials_ready': credentials_ready,
+            'whitelist_required': False,
+        }
+
+    if config.RUN_MODE == 'live':
+        return {
+            'node_name': node_name,
+            'run_mode': 'live',
+            'label': '實盤',
+            'summary': f"實盤｜{node_name}｜{'API已設定' if credentials_ready else 'API未設定'}",
+            'tone': 'live',
+            'detail': '目前會嘗試連到 OKX 實盤；如果憑證或白名單未完成，實盤功能會受限。',
+            'credentials_ready': credentials_ready,
+            'whitelist_required': True,
+        }
+
+    return {
+        'node_name': node_name,
+        'run_mode': 'auto',
+        'label': '自動',
+        'summary': f"自動｜{node_name}｜{'API已設定' if credentials_ready else 'API未設定'}",
+        'tone': 'auto',
+        'detail': '模式會依設定自動切換。若要穩定運作，建議先完成 OKX API 與白名單設定。',
+        'credentials_ready': credentials_ready,
+        'whitelist_required': True,
+    }
+
 # --- BACKGROUND SYNC DAEMON INIT ---
 state.account_data = load_local_account_snapshot() or {'totalEq': 0.0, 'usdtEq': 0.0, 'usdtAvail': 0.0, 'source': 'init'}
 
@@ -86,7 +125,7 @@ def api_trades():
             'trades': visible_trades,
             'live_positions': live_positions,
             'radar': state.market_radar_dict,
-            'runtime': build_runtime_status(),
+            'runtime': build_runtime_status_v2(),
             'regime': get_btc_market_regime(),
             'account': state.account_data,
             'profiles': config.STRATEGY_PROFILES,
@@ -113,7 +152,7 @@ def api_report():
         live_positions=live_positions,
         include_potentials=True,
     ) if t.get('symbol')]
-    return jsonify(json_safe({'report': build_bot_report(visible_trades, live_positions=live_positions), 'live_positions': live_positions, 'runtime': build_runtime_status()}))
+    return jsonify(json_safe({'report': build_bot_report(visible_trades, live_positions=live_positions), 'live_positions': live_positions, 'runtime': build_runtime_status_v2()}))
 
 @app.route('/api/history')
 def api_history():

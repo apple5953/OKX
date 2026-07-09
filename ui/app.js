@@ -311,6 +311,36 @@ function renderRuntimeStatus() {
     }
 }
 
+function renderRuntimeStatusV2() {
+    const chip = document.getElementById('runtime-wrapper');
+    const textEl = document.getElementById('runtime-text');
+    if (!chip || !textEl) return;
+
+    const mode = String(runtimeStatus.run_mode || (runtimeStatus.mock_mode ? 'mock' : 'auto')).toLowerCase();
+    const label = runtimeStatus.label || runtimeLabel(mode);
+    const nodeName = runtimeStatus.node_name || '-';
+    const creds = runtimeStatus.credentials_ready ? 'API已設定' : 'API未設定';
+    const summary = runtimeStatus.summary || `${label}｜${nodeName}｜${creds}`;
+    const detail = runtimeStatus.detail || '';
+
+    textEl.textContent = summary;
+    chip.title = detail || summary;
+
+    if (mode === 'mock') {
+        chip.style.background = 'rgba(34,197,94,0.15)';
+        chip.style.border = '1px solid rgba(34,197,94,0.3)';
+        chip.style.color = '#22c55e';
+    } else if (mode === 'live') {
+        chip.style.background = 'rgba(248,113,113,0.15)';
+        chip.style.border = '1px solid rgba(248,113,113,0.3)';
+        chip.style.color = '#f87171';
+    } else {
+        chip.style.background = 'rgba(245,158,11,0.15)';
+        chip.style.border = '1px solid rgba(245,158,11,0.3)';
+        chip.style.color = '#f59e0b';
+    }
+}
+
 function verdictDetail(perf) {
     const verdict = perf?.verdict || 'learning';
     if (verdict === 'pause') return '不是整台關掉：此模式仍持續掃描與開 60U 基準訓練單，只是不放大倉位。';
@@ -1064,6 +1094,7 @@ async function fetchTrades() {
         currentTrades = Array.isArray(data.trades) ? data.trades : [];
         radarData = data.radar && typeof data.radar === 'object' ? data.radar : {};
         runtimeStatus = data.runtime && typeof data.runtime === 'object' ? data.runtime : runtimeStatus;
+        renderRuntimeStatusV2();
         latestRegime = data.regime || 'ranging';
         
         // Update Topbar market regime indicator
@@ -1082,7 +1113,7 @@ async function fetchTrades() {
                 regWrap.style.color = '#3b82f6';
             }
         }
-        renderRuntimeStatus();
+        renderRuntimeStatusV2();
         
         accountData = data.account && typeof data.account === 'object' ? data.account : {};
         profiles = data.profiles && typeof data.profiles === 'object' ? data.profiles : profiles;
