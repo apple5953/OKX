@@ -137,49 +137,116 @@ def api_intelligence():
 
 @app.route('/api/git-pull', methods=['POST'])
 def api_git_pull():
+    import urllib.request
+    import zipfile
+    import shutil
     import subprocess
     import sys
     import os
     import threading
+    from pathlib import Path
 
     try:
-        # 執行 git pull
-        result = subprocess.run(
-            ['git', 'pull', 'origin', 'main'],
-            capture_output=True,
-            text=True,
-            cwd=config.PROJECT_DIR,
-            encoding='utf-8',
-            errors='ignore'
-        )
-        
-        output = result.stdout or ""
-        error = result.stderr or ""
-        
-        if result.returncode != 0:
-            return jsonify({'success': False, 'message': f"Git pull 失敗: {error}"}), 500
+        # 1. 優先嘗試標準的 Git Pull (如果本機有 Git 且是在 Git 倉庫內)
+        has_git = False
+        try:
+            # 測試系統是否有 git 指令
+            subprocess.run(['git', '--version'], capture_output=True)
+            has_git = Path(config.PROJECT_DIR).joinpath('.git').exists()
+        except Exception:
+            pass
 
-        # 檢查是否真的有拉取更新
-        if "Already up to date" in output or "已經是最新的" in output:
-            return jsonify({'success': True, 'updated': False, 'message': "機器人代碼已是最新版本，無需更新。"}), 200
+        if has_git:
+            # 使用當前使用的分支或預設分支上游更新
+            result = subprocess.run(
+                ['git', 'pull', 'origin', 'codex/upload-current-bot'],
+                capture_output=True,
+                text=True,
+                cwd=config.PROJECT_DIR,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            output = result.stdout or ""
+            error = result.stderr or ""
+            
+            if result.returncode == 0:
+                if "Already up to date" in output or "已經是最新的" in output:
+                    return jsonify({'success': True, 'updated': False, 'message': "機器人代碼已是最新版本，無需更新。"}), 200
+                
+                # 自動重啟加載新代碼
+                def restart_server():
+                    time.sleep(2)
+                    os._exit(0)
+                threading.Thread(target=restart_server, daemon=True).start()
+                return jsonify({'success': True, 'updated': True, 'message': "代碼已透過 Git 同步更新！機器人將在 3 秒內自動重啟加載。"}), 200
 
-        # 如果真的有代碼更新，啟動一個延時背景線程以重啟服務
-        def restart_server():
+        # 2. 如果沒有 Git 環境，則觸發免 Git 綠色更新 (下載 ZIP 解壓覆蓋)
+        print("[🔄 ZIP UPDATE] 系統未安裝 Git，啟動免 Git HTTP 更新機制...")
+        zip_url = "https://github.com/apple5953/OKX/archive/refs/heads/codex/upload-current-bot.zip"
+        temp_zip_path = Path(config.PROJECT_DIR) / "temp_update.zip"
+        extract_dir = Path(config.PROJECT_DIR) / "temp_extracted"
+
+        # 下載最新 ZIP 包
+        req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(temp_zip_path, 'wb') as out_file:
+            shutil.copyfileobj(response, out_file)
+
+        # 解壓
+        with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_dir)
+
+        # 搜尋解壓後的根路徑 (通常會是 OKX-codex-upload-current-bot 目錄)
+        extracted_folders = list(extract_dir.glob("*"))
+        if not extracted_folders:
+            raise Exception("下載的 ZIP 包為空，無法完成更新")
+
+        source_folder = extracted_folders[0]
+
+        # 覆蓋本地核心程式代碼，但排除掉本機獨特的配置文件與 active_trades/journal 以免數據遺失
+        # 排除清單
+        preserved_files = {
+            'active_trades.json', 'global_optimizer.json', 'optimization_cycle_state.json',
+            'api_dump.json', 'api_output.json'
+        }
+        for item in source_folder.rglob("*"):
+            if item.is_file():
+                # 計算相對路徑
+                rel_path = item.relative_to(source_folder)
+                target_file_path = Path(config.PROJECT_DIR) / rel_path
+                
+                # 如果是本機數據庫文件且本地已存在，跳過覆蓋以保護數據
+                if rel_path.name in preserved_files and target_file_path.exists():
+                    continue
+                # 排除本機的專屬設備日誌
+                if rel_path.name.startswith("journal_") or rel_path.name.startswith("active_trades_"):
+                    continue
+
+                # 確保目標父資料夾存在並覆蓋寫入
+                target_file_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target_file_path)
+
+        # 清理臨時文件
+        try:
+            shutil.rmtree(extract_dir)
+            temp_zip_path.unlink()
+        except Exception:
+            pass
+
+        # 觸發背景延時重啟以加載更新
+        def restart_server_zip():
             time.sleep(2)
-            print("[🔄 GIT UPDATE] 檢測到 GITHUB 代碼更新，正在重啟服務以加載新版本...")
-            os._exit(0)  # 觸發 auto_restart.py 重啟
+            print("[🔄 ZIP UPDATE] 免 Git 更新覆蓋完成，正在重新啟動伺服器...")
+            os._exit(0)
+        threading.Thread(target=restart_server_zip, daemon=True).start()
 
-        import time
-        threading.Thread(target=restart_server, daemon=True).start()
-        
         return jsonify({
             'success': True,
             'updated': True,
-            'message': "GITHUB 代碼同步成功！機器人將在 3 秒內自動完成平滑重啟以加載新版本。"
+            'message': "已成功繞過 Git 限制，從 Github 綠色同步更新！機器人將在 3 秒內自動完成平滑重啟。"
         }), 200
 
     except Exception as e:
-        return jsonify({'success': False, 'message': f"同步過程中出現異常: {str(e)}"}), 500
+        return jsonify({'success': False, 'message': f"同步更新失敗: {str(e)}"}), 500
 
 @app.route('/api/reset-optimizer', methods=['POST'])
 def api_reset_optimizer():
