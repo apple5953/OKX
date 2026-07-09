@@ -226,9 +226,9 @@ def assess_accounting_record(record, lifecycle):
 
     if not lifecycle:
         return {
-            'accounting_status': 'verified' if is_valid_strategy else 'manual',
-            'eligible_for_learning': is_valid_strategy, # 如果是四大核心策略產生的單，強制允許納入學習
-            'accounting_reasons': [] if is_valid_strategy else ['no exact strategy lifecycle match'],
+            'accounting_status': 'unmatched' if is_valid_strategy else 'manual',
+            'eligible_for_learning': False,
+            'accounting_reasons': ['no exact strategy lifecycle match'],
         }
 
     info = record.get('info') or {}
@@ -276,7 +276,7 @@ def assess_accounting_record(record, lifecycle):
     # 強制放寬：如果是核心策略單，即使觸發了隔離審計，也依然允許學習其虧損和盈利軌跡來修復參數
     return {
         'accounting_status': 'quarantined' if reasons else 'verified',
-        'eligible_for_learning': True if is_valid_strategy else not reasons,
+        'eligible_for_learning': bool(is_valid_strategy and not reasons),
         'accounting_reasons': reasons,
     }
 

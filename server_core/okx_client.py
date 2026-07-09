@@ -230,7 +230,7 @@ def realized_strategy_rows(strategy_name, limit):
     for row in reversed(history):
         if row.get('strategy') != strategy_name:
             continue
-        if row.get('eligible_for_learning') is not True:
+        if row.get('eligible_for_learning') is not True or row.get('accounting_status') != 'verified':
             continue
         from .strategies import version_matches_strategy_scope
         if version_matches_strategy_scope(row.get('strategy_version')):
@@ -245,7 +245,8 @@ def realized_strategy_rows(strategy_name, limit):
             row for row in reversed(state.trade_journal)
             if row.get('strategy') == strategy_name
             and row.get('status') == 'closed'
-            and row.get('eligible_for_learning') is not False
+            and row.get('eligible_for_learning') is True
+            and row.get('accounting_status') == 'verified'
             and version_matches_strategy_scope(row.get('strategy_version'))
         ]
         for row in journal_rows:
