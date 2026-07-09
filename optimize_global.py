@@ -5,8 +5,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# 1. Merge all journal files
-all_journals = glob.glob(str(BASE_DIR / 'journal_macmini_*.json'))
+# 1. Merge all node journal files
+all_journals = glob.glob(str(BASE_DIR / 'journal_*.json'))
 global_journal = []
 for j_file in all_journals:
     try:

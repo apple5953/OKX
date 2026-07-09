@@ -2,33 +2,22 @@ import os
 import sys
 import time
 import threading
-from pathlib import Path
 from server_core import config, state, utils, okx_client, strategies, execution, engine, web_server
 
 # Load existing state
-trade_candidates = [config.TRADE_FILE]
-if getattr(config, 'LEGACY_TRADE_FILE', None):
-    trade_candidates.append(config.LEGACY_TRADE_FILE)
-state.active_trades, loaded_trade_path = utils.load_json_list_candidates(trade_candidates, 'active trades')
-if loaded_trade_path and loaded_trade_path != config.TRADE_FILE:
+state.active_trades = utils.load_json_list(config.TRADE_FILE, 'active trades')
+if not os.path.exists(config.TRADE_FILE):
     try:
         utils.write_json_atomic(config.TRADE_FILE, state.active_trades)
     except Exception as e:
-        print(f"Failed to migrate active trades from {loaded_trade_path} to {config.TRADE_FILE}: {e}")
+        print(f"Failed to initialize active trades file {config.TRADE_FILE}: {e}")
 
-# Merge all available node journals for aggregate UI metrics
-import glob
-all_journals = glob.glob(str(Path(config.PROJECT_DIR) / 'journal_*.json'))
-legacy_journal = getattr(config, 'LEGACY_JOURNAL_FILE', None)
-if legacy_journal and os.path.exists(legacy_journal) and legacy_journal not in all_journals:
-    all_journals.append(legacy_journal)
-state.trade_journal = []
-for j_file in all_journals:
+state.trade_journal = utils.load_json_list(config.JOURNAL_FILE, 'journal file')
+if not os.path.exists(config.JOURNAL_FILE):
     try:
-        loaded = utils.load_json_list(j_file, f'journal file {j_file}')
-        state.trade_journal.extend(loaded)
+        utils.write_json_atomic(config.JOURNAL_FILE, state.trade_journal)
     except Exception as e:
-        print(f"Error loading journal file {j_file}: {e}")
+        print(f"Failed to initialize journal file {config.JOURNAL_FILE}: {e}")
 
 state.trade_id_counter = max([t['id'] for t in state.active_trades], default=0) + 1
 

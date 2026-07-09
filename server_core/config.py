@@ -1,8 +1,30 @@
 import datetime
+import os
+import re
+import socket
+import uuid
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE_DIR = PROJECT_DIR.parent
+
+
+def _sanitize_node_name(value):
+    text = re.sub(r'[^A-Za-z0-9._-]+', '-', str(value or '').strip())
+    return text.strip('.-_')
+
+
+def resolve_node_name():
+    explicit = _sanitize_node_name(os.getenv('OKX_NODE_NAME') or os.getenv('NODE_NAME'))
+    if explicit:
+        return explicit
+
+    hostname = _sanitize_node_name(socket.gethostname()).lower()
+    if hostname:
+        suffix = f'{uuid.getnode():012x}'[-6:]
+        return f'{hostname}-{suffix}'
+
+    return f'node-{uuid.getnode():012x}'
 
 OKX_API_KEY = 'f1b9af15-e584-4911-b949-ff42168fd53c'
 OKX_SECRET = 'A64C98D3C5E8B38A963566313BA31EF1'
@@ -91,7 +113,7 @@ MARKET_DATA_TTL_SECONDS = {
     '1d': 1800,
 }
 
-NODE_NAME = 'macmini_01'
+NODE_NAME = resolve_node_name()
 TRADE_FILE = str(PROJECT_DIR / f'active_trades_{NODE_NAME}.json')
 JOURNAL_FILE = str(PROJECT_DIR / f'journal_{NODE_NAME}.json')
 LEGACY_TRADE_FILE = str(PROJECT_DIR / 'active_trades.json')

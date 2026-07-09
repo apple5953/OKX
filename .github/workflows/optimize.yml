@@ -28,9 +28,21 @@ jobs:
         run: |
           python optimize_global.py
 
+      - name: Rebase on latest main
+        run: |
+          git pull --rebase --autostash origin main
+
       - name: Commit and Push optimized parameters
         run: |
           git config --global user.name "AI Master Optimizer"
           git config --global user.email "actions@github.com"
+          shopt -s nullglob
+          journal_files=(journal_*.json)
           git add global_optimizer.json
-          git diff-index --quiet HEAD || (git commit -m "AI Master: Global DNA updated" && git push origin main)
+          if [ ${#journal_files[@]} -gt 0 ]; then
+            git add "${journal_files[@]}"
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m "AI Master: Global DNA updated"
+            git push origin main
+          fi
