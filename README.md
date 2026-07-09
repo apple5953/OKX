@@ -178,6 +178,8 @@ run_bot.sh
 - verify strategy logic without real capital risk
 - contribute simulated learning data through journals
 
+The top-right runtime badge on the dashboard now shows `模擬單 / 實盤 / 自動` so you can tell the mode at a glance.
+
 ## Update flow
 
 If the repo is already cloned on a machine:

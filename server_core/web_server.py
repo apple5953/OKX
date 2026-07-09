@@ -20,6 +20,38 @@ def serve_root():
 def serve_static(path):
     return send_from_directory('../ui', path)
 
+def build_runtime_status():
+    credentials_ready = bool(config.OKX_API_KEY and config.OKX_SECRET and config.OKX_PASSWORD)
+    if config.MOCK_MODE:
+        return {
+            'node_name': config.NODE_NAME,
+            'run_mode': 'mock',
+            'label': '模擬單',
+            'tone': 'mock',
+            'detail': '本機只做公開行情與模擬訓練，不送出真實 OKX 委託。',
+            'credentials_ready': credentials_ready,
+            'whitelist_required': False,
+        }
+    if config.RUN_MODE == 'live':
+        return {
+            'node_name': config.NODE_NAME,
+            'run_mode': 'live',
+            'label': '實盤',
+            'tone': 'live',
+            'detail': '這台機器會嘗試連到 OKX 並執行真實交易。',
+            'credentials_ready': credentials_ready,
+            'whitelist_required': True,
+        }
+    return {
+        'node_name': config.NODE_NAME,
+        'run_mode': 'auto',
+        'label': '自動',
+        'tone': 'auto',
+        'detail': '有權限時實盤，沒有權限時會退回模擬。',
+        'credentials_ready': credentials_ready,
+        'whitelist_required': True,
+    }
+
 # --- BACKGROUND SYNC DAEMON INIT ---
 state.account_data = load_local_account_snapshot() or {'totalEq': 0.0, 'usdtEq': 0.0, 'usdtAvail': 0.0, 'source': 'init'}
 
@@ -54,6 +86,7 @@ def api_trades():
             'trades': visible_trades,
             'live_positions': live_positions,
             'radar': state.market_radar_dict,
+            'runtime': build_runtime_status(),
             'regime': get_btc_market_regime(),
             'account': state.account_data,
             'profiles': config.STRATEGY_PROFILES,
@@ -80,7 +113,7 @@ def api_report():
         live_positions=live_positions,
         include_potentials=True,
     ) if t.get('symbol')]
-    return jsonify(json_safe({'report': build_bot_report(visible_trades, live_positions=live_positions), 'live_positions': live_positions}))
+    return jsonify(json_safe({'report': build_bot_report(visible_trades, live_positions=live_positions), 'live_positions': live_positions, 'runtime': build_runtime_status()}))
 
 @app.route('/api/history')
 def api_history():
@@ -274,4 +307,3 @@ def api_reset_optimizer():
         return jsonify({'success': True, 'message': '所有模式數值已重製成功，自適應優化已重新初始化為探索狀態。'}), 200
     except Exception as e:
         return jsonify({'success': False, 'message': f'重製失敗: {str(e)}'}), 500
-

@@ -11,6 +11,7 @@ let sessionOptimizerData = {};
 let sessionReportData = { live_modes: [], weak_modes: [] };
 let accountData = {};
 let reportData = {};
+let runtimeStatus = {};
 let currentStrategyFilter = 'All';
 let latestRegime = 'ranging';
 let currentStrategyVersion = 'v9';
@@ -269,9 +270,45 @@ function optimizerLabel(opt) {
     return optimizerText[opt.state] || opt.state || '-';
 }
 
+function runtimeLabel(mode) {
+    const raw = String(mode || '').toLowerCase();
+    if (raw === 'mock') return '\u6a21\u64ec\u55ae';
+    if (raw === 'live') return '\u5be6\u76e4';
+    return '\u81ea\u52d5';
+}
+
 function optimizerLine(opt) {
     if (!opt) return '\u81ea\u52d5\u8abf\u53c3\u5c1a\u672a\u540c\u6b65';
     return `\u81ea\u52d5\u8abf\u53c3: ${optimizerLabel(opt)} / \u9032\u5834x${num(opt.tolerance_mult, 2)} / RRx${num(opt.target_rr_mult, 2)} / \u51b7\u537bx${num(opt.cooldown_mult, 2)}`;
+}
+
+function renderRuntimeStatus() {
+    const chip = document.getElementById('runtime-wrapper');
+    const textEl = document.getElementById('runtime-text');
+    if (!chip || !textEl) return;
+
+    const mode = String(runtimeStatus.run_mode || (runtimeStatus.mock_mode ? 'mock' : 'auto')).toLowerCase();
+    const label = runtimeStatus.label || runtimeLabel(mode);
+    const nodeName = runtimeStatus.node_name || '-';
+    const creds = runtimeStatus.credentials_ready ? '\u5df2\u8a2d\u5b9a\u6a5f\u69cb' : '\u5c1a\u672a\u8a2d\u5b9a\u6a5f\u69cb';
+    const detail = runtimeStatus.detail || '';
+
+    textEl.textContent = `${label}｜${nodeName}｜${creds}`;
+    chip.title = detail || `${label} ${nodeName}`;
+
+    if (mode === 'mock') {
+        chip.style.background = 'rgba(34,197,94,0.15)';
+        chip.style.border = '1px solid rgba(34,197,94,0.3)';
+        chip.style.color = '#22c55e';
+    } else if (mode === 'live') {
+        chip.style.background = 'rgba(248,113,113,0.15)';
+        chip.style.border = '1px solid rgba(248,113,113,0.3)';
+        chip.style.color = '#f87171';
+    } else {
+        chip.style.background = 'rgba(245,158,11,0.15)';
+        chip.style.border = '1px solid rgba(245,158,11,0.3)';
+        chip.style.color = '#f59e0b';
+    }
 }
 
 function verdictDetail(perf) {
@@ -1026,6 +1063,7 @@ async function fetchTrades() {
         if (data.error) console.warn('api_trades fallback', data.error);
         currentTrades = Array.isArray(data.trades) ? data.trades : [];
         radarData = data.radar && typeof data.radar === 'object' ? data.radar : {};
+        runtimeStatus = data.runtime && typeof data.runtime === 'object' ? data.runtime : runtimeStatus;
         latestRegime = data.regime || 'ranging';
         
         // Update Topbar market regime indicator
@@ -1044,6 +1082,7 @@ async function fetchTrades() {
                 regWrap.style.color = '#3b82f6';
             }
         }
+        renderRuntimeStatus();
         
         accountData = data.account && typeof data.account === 'object' ? data.account : {};
         profiles = data.profiles && typeof data.profiles === 'object' ? data.profiles : profiles;
@@ -1365,4 +1404,3 @@ async function resetOptimizer() {
         }
     }
 }
-
