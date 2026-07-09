@@ -39,12 +39,12 @@ PROFIT_FIRST_MIN_ROOM_BY_TIMEFRAME = {
     '1h': 0.0035,
     '4h': 0.0045,
 }
-MFE_BE_R = 0.08
-MFE_LOCK_R = 0.20
-MFE_RUNNER_R = 0.45
-MFE_BE_LOCK_R = 0.06
-MFE_LOCK_FRACTION = 0.30
-MFE_TRAIL_GIVEBACK_R = 0.10
+MFE_BE_R = 0.15       # 提高保本觸發 R 值 (舊值: 0.08)
+MFE_LOCK_R = 0.35     # 提高保利觸發 R 值 (舊值: 0.20)
+MFE_RUNNER_R = 0.60   # 提高鎖死追隨 R 值 (舊值: 0.45)
+MFE_BE_LOCK_R = 0.10  # 鎖定 R 值
+MFE_LOCK_FRACTION = 0.40 # 鎖利回吐保護分位數 (舊值: 0.30)
+MFE_TRAIL_GIVEBACK_R = 0.15 # 給予回吐 R 值 (舊值: 0.10)
 ROUND_TRIP_TAKER_RATE = 0.0010
 SLIPPAGE_BUFFER_RATE = 0.00025
 FEE_SAFE_PROFIT_RATE = ROUND_TRIP_TAKER_RATE + SLIPPAGE_BUFFER_RATE
@@ -107,9 +107,9 @@ STRATEGY_PROFILES = {
         'sl_atr': 1.2,         # 稍收緊，1.5% ATR -> 1.8%
         'tp_atr': 3.5,         # 下調，1.5% ATR -> 5.2% 止盈
         'min_rr': 1.40,        # 務實盈虧比
-        'be_threshold': 0.16,
-        'lock_threshold': 0.35,
-        'trail_buffer': 0.10,
+        'be_threshold': 0.20,  # 提高成本保護門檻，給波動空間 (舊值: 0.16)
+        'lock_threshold': 0.45, # 提高保利鎖定門檻，避免回調甩下車 (舊值: 0.35)
+        'trail_buffer': 0.15,  # 增加追蹤回吐容忍緩衝區 (舊值: 0.10)
         'remove_tp_at': 0.50,
     },
     'MeanReversion': {
@@ -119,9 +119,9 @@ STRATEGY_PROFILES = {
         'sl_atr': 0.8,         # 快速認錯，1.5% ATR -> 1.2%
         'tp_atr': 1.4,         # 均值回歸快進快出，1.5% ATR -> 2.1% 止盈
         'min_rr': 1.05,
-        'be_threshold': 0.05,
-        'lock_threshold': 0.15,
-        'trail_buffer': 0.05,
+        'be_threshold': 0.08,  # (舊值: 0.05)
+        'lock_threshold': 0.20, # (舊值: 0.15)
+        'trail_buffer': 0.08,  # (舊值: 0.05)
         'remove_tp_at': 0.95,
     },
     'Contrarian': {
@@ -131,9 +131,9 @@ STRATEGY_PROFILES = {
         'sl_atr': 1.1,         # 配合精準極端 RSI, 1.5% ATR -> 1.65%
         'tp_atr': 2.6,         # 反彈波段，1.5% ATR -> 3.9% 止盈
         'min_rr': 1.30,
-        'be_threshold': 0.10,
-        'lock_threshold': 0.28,
-        'trail_buffer': 0.08,
+        'be_threshold': 0.15,  # (舊值: 0.10)
+        'lock_threshold': 0.35, # (舊值: 0.28)
+        'trail_buffer': 0.12,  # (舊值: 0.08)
         'remove_tp_at': 0.60,
     },
     'SqueezeHunter': {
@@ -143,9 +143,9 @@ STRATEGY_PROFILES = {
         'sl_atr': 1.1,         # 突破不回頭，1.5% ATR -> 1.65%
         'tp_atr': 3.0,         # 追突破吃波段，1.5% ATR -> 4.5% 止盈
         'min_rr': 1.25,
-        'be_threshold': 0.10,
-        'lock_threshold': 0.24,
-        'trail_buffer': 0.08,
+        'be_threshold': 0.15,  # (舊值: 0.10)
+        'lock_threshold': 0.32, # (舊值: 0.24)
+        'trail_buffer': 0.12,  # (舊值: 0.08)
         'remove_tp_at': 0.45,
     },
 }

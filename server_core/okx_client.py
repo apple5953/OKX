@@ -195,12 +195,6 @@ def sync_exchange_history(force=False):
     return state.exchange_history_cache
 
 def realized_strategy_rows(strategy_name, limit):
-    import sys
-    if 'server' in sys.modules:
-        srv = sys.modules['server']
-        if hasattr(srv, '__dict__') and 'realized_strategy_rows' in srv.__dict__:
-            return srv.__dict__['realized_strategy_rows'](strategy_name, limit)
-
     history = sync_exchange_history()
     rows = []
     seen_keys = set()

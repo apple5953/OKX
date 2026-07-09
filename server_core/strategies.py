@@ -51,10 +51,12 @@ def squeeze_hunter_release_ready(df, sample=0):
     return was_squeezed and is_expanding
 
 def version_matches_strategy_scope(row_version):
-    # Strict matching: Exclude empty or non-matching versions to guarantee clean session resets
     if not row_version:
         return False
-    return str(row_version) == config.STRATEGY_VERSION
+    # 允許機器人讀取最近 v8 到 v12 的所有歷史平倉單來做交叉學習
+    allowed_versions = {'v8', 'v9', 'v10', 'v11', 'v12', 'execution-safety-v8-20260701'}
+    v_clean = str(row_version).strip().lower()
+    return any(v in v_clean for v in allowed_versions)
 
 def recent_strategy_stats(strategy_name, category=None, limit=40):
     from .okx_client import sync_exchange_history
@@ -905,81 +907,95 @@ def evaluate_mode_gate(strategy_name, direction, rsi, trends, in_prz, true_rr, t
     # 1. 計算 ADX 趨勢強度
     adx_series = calculate_adx(df)
     adx = adx_series.iloc[-1] if not adx_series.empty else 20.0
+    adx_prev = adx_series.iloc[-2] if len(adx_series) > 1 else 20.0
+    adx_rising = adx > adx_prev
     
     # 2. 計算成交量相對於前 20 根均值的倍數
     avg_vol = df['volume'].tail(20).mean()
     vol_ratio = (last_candle['volume'] / avg_vol) if avg_vol > 0 else 1.0
 
+    # 4種模式協同防線 (Regime Synergy Segmentation)
+    # [趨勢市] ADX > 22 且遞增 -> 優先走 MacroSniper (順勢) / SqueezeHunter (突破)
+    # [震盪市] ADX <= 22 或是遞減 -> 優先走 MeanReversion (超買超賣拉回)
+    # [極端拐點] 適用 Contrarian (抓大週期極限衰竭，不受 ADX 限制，但嚴格驗證背離與流動性)
+    
     # 1. MacroSniper: 大週期趨勢狙擊
     if strategy_name == 'MacroSniper':
-        # 核心優化：必須處於「強趨勢」市場 (ADX > 25 且 ADX 處於上升通道)
-        if adx < 25:
-            return False, f'MacroSniper gate: ADX trend strength {adx:.1f} < 25 (ranging market)'
-        
-        adx_prev = adx_series.iloc[-2] if len(adx_series) > 1 else 20.0
-        if adx < adx_prev:
-            return False, 'MacroSniper gate: ADX trend momentum is declining'
+        # 核心協同：只在明確的強趨勢環境下開單
+        if adx < 22:
+            return False, f'MacroSniper: ADX {adx:.1f} < 22 (market is ranging, hand over to MeanReversion)'
+        if not adx_rising and adx < 30:
+            return False, 'MacroSniper: ADX momentum declining (trend is cooling down)'
 
-        # 嚴格趨勢共振：大週期和小週期必須方向一致
-        if direction == 'bullish' and not (trends.get('1h') == 'bull' and trends.get('4h') == 'bull'):
-            return False, 'MacroSniper gate: trend resonance not bullish'
-        if direction == 'bearish' and not (trends.get('1h') == 'bear' and trends.get('4h') == 'bear'):
-            return False, 'MacroSniper gate: trend resonance not bearish'
+        # 趨勢方向判定 (放寬主流幣以保證開單量，山寨幣仍需嚴格共振)
+        h1 = trends.get('1h')
+        h4 = trends.get('4h')
+        if direction == 'bullish':
+            if is_major and not (h1 == 'bull' or h4 == 'bull'):
+                return False, 'MacroSniper: Major trend not bullish'
+            elif not is_major and not (h1 == 'bull' and h4 == 'bull'):
+                return False, 'MacroSniper: Altcoin lacks dual HTF bull resonance'
+        elif direction == 'bearish':
+            if is_major and not (h1 == 'bear' or h4 == 'bear'):
+                return False, 'MacroSniper: Major trend not bearish'
+            elif not is_major and not (h1 == 'bear' and h4 == 'bear'):
+                return False, 'MacroSniper: Altcoin lacks dual HTF bear resonance'
 
-    # 2. MeanReversion: 快速均值回歸
-    if strategy_name == 'MeanReversion':
-        # 核心優化：拒絕在「超強趨勢」(ADX > 32) 中逆勢接飛刀
-        if adx > 32:
-            return False, f'MeanReversion gate: ADX trend {adx:.1f} is too strong to fight (risk of trend run)'
+    # 2. MeanReversion: 快速均值回歸 (專打震盪)
+    elif strategy_name == 'MeanReversion':
+        # 核心協同：拒絕在「超強趨勢」(ADX > 32 且還在升) 中逆勢接飛刀，此時應該交給 SqueezeHunter 或 MacroSniper
+        if adx > 32 and adx_rising:
+            return False, f'MeanReversion: ADX {adx:.1f} too strong (trend run active, hand over to MacroSniper)'
 
-        # 防止在強大單邊趨勢中接飛刀：大週期 4h 若是強勢，不允許逆大勢做均值回歸
-        if direction == 'bullish' and trends.get('4h') == 'bear':
-            return False, 'MeanReversion gate: cannot buy against strong 4H bear trend'
-        if direction == 'bearish' and trends.get('4h') == 'bull':
-            return False, 'MeanReversion gate: cannot sell against strong 4H bull trend'
+        # 大週期極端單邊趨勢下，禁止逆大勢做小波段拉回
+        h4 = trends.get('4h')
+        if direction == 'bullish' and h4 == 'bear' and adx > 25:
+            return False, 'MeanReversion: Cannot buy against strong 4H bear trend'
+        if direction == 'bearish' and h4 == 'bull' and adx > 25:
+            return False, 'MeanReversion: Cannot sell against strong 4H bull trend'
             
-        # 增加短線超買超賣過濾 (防止提前進場)
-        if direction == 'bullish' and rsi > 38:
-            return False, f'MeanReversion gate: RSI {rsi:.1f} not low enough (needs < 38)'
-        if direction == 'bearish' and rsi < 62:
-            return False, f'MeanReversion gate: RSI {rsi:.1f} not high enough (needs > 62)'
+        # 溫和超買超賣即可進場 (放寬以確保開單量)
+        if direction == 'bullish' and rsi > 42:
+            return False, f'MeanReversion: RSI {rsi:.1f} not low enough (needs < 42)'
+        if direction == 'bearish' and rsi < 58:
+            return False, f'MeanReversion: RSI {rsi:.1f} not high enough (needs > 58)'
 
-    # 3. Contrarian: 拐點反轉
-    if strategy_name == 'Contrarian':
-        # 核心優化：必須有背離訊號 (div_ok) 或 流動性掠奪跡象 (sweep_ok / 長影線針頭)
+    # 3. Contrarian: 拐點反轉 (摸頂摸底，防禦大回撤)
+    elif strategy_name == 'Contrarian':
+        # 核心協同：必須有背離訊號 (div_ok) 或 流動性掠奪跡象 (sweep_ok / 長影線針頭)
         has_reversal_wick = False
         avg_body = abs(df['close'].tail(10) - df['open'].tail(10)).mean()
         
         if direction == 'bullish':
             lower_wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
-            if lower_wick > avg_body * 1.5:  # 長下影線
+            if lower_wick > avg_body * 1.2:  # 放寬至 1.2 倍
                 has_reversal_wick = True
         else:
             upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
-            if upper_wick > avg_body * 1.5:  # 長上影線
+            if upper_wick > avg_body * 1.2:  # 放寬至 1.2 倍
                 has_reversal_wick = True
 
         if not (div_ok or sweep_ok or has_reversal_wick):
-            return False, 'Contrarian gate: lacks divergence, liquidity sweep, or reversal wick signature'
+            return False, 'Contrarian: lacks divergence, liquidity sweep, or reversal wick signature'
 
-        # 嚴格收緊 RSI 限制，非極端不摸頂底
-        if direction == 'bullish' and rsi > 28:
-            return False, f'Contrarian gate: RSI {rsi:.1f} too high for bullish reversal (needs < 28)'
-        if direction == 'bearish' and rsi < 72:
-            return False, f'Contrarian gate: RSI {rsi:.1f} too low for bearish reversal (needs > 72)'
+        # 只抓極端的 RSI 點位以確保高勝率 (Contrarian 做為最後防禦線)
+        if direction == 'bullish' and rsi > 32:
+            return False, f'Contrarian: RSI {rsi:.1f} too high for bullish reversal (needs < 32)'
+        if direction == 'bearish' and rsi < 68:
+            return False, f'Contrarian: RSI {rsi:.1f} too low for bearish reversal (needs > 68)'
 
     # 4. SqueezeHunter: 擠壓突破
-    if strategy_name == 'SqueezeHunter':
-        # 核心優化：突破必須放量 (成交量大於均線 1.5 倍) 以證明非虛假突破
-        if vol_ratio < 1.50:
-            return False, f'SqueezeHunter gate: volume breakout ratio {vol_ratio:.2f}x < 1.50x (weak breakout)'
+    elif strategy_name == 'SqueezeHunter':
+        # 核心協同：必須是在趨勢即將爆發 (ADX 剛抬頭或量能剛起)
+        # 放寬成交量爆發限制至 1.25 倍 (主流幣 1.15 倍)，但突破方向必須與短期趨勢同向
+        required_vol = 1.15 if is_major else 1.25
+        if vol_ratio < required_vol:
+            return False, f'SqueezeHunter: volume breakout ratio {vol_ratio:.2f}x < {required_vol}x (weak breakout)'
 
-        # 必須有歷史擠壓跡象 (8根K線內有擠壓)，且當前寬度開始放大 (突破發散)
-        if df.empty or len(df) < 8:
-            return False, 'SqueezeHunter gate: insufficient data'
+        # 必須有歷史擠壓跡象 (8根K線內有擠壓)
         was_squeezed = any(df.tail(8)['is_squeezed'])
         if not was_squeezed:
-            return False, 'SqueezeHunter gate: no volatility squeeze detected in last 8 candles'
+            return False, 'SqueezeHunter: no volatility squeeze detected in last 8 candles'
 
     return True, ''
 

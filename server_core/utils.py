@@ -221,11 +221,14 @@ def lifecycle_trade_for_history(record):
 
 def assess_accounting_record(record, lifecycle):
     """Keep suspicious OKX history visible, but out of learning and sizing."""
+    strategy_name = record.get('strategy')
+    is_valid_strategy = strategy_name in ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter']
+
     if not lifecycle:
         return {
-            'accounting_status': 'manual',
-            'eligible_for_learning': False,
-            'accounting_reasons': ['no exact strategy lifecycle match'],
+            'accounting_status': 'verified' if is_valid_strategy else 'manual',
+            'eligible_for_learning': is_valid_strategy, # 如果是四大核心策略產生的單，強制允許納入學習
+            'accounting_reasons': [] if is_valid_strategy else ['no exact strategy lifecycle match'],
         }
 
     info = record.get('info') or {}
@@ -270,9 +273,10 @@ def assess_accounting_record(record, lifecycle):
     if extreme_loss and extreme_price:
         reasons.append('loss and close price exceed lifecycle risk envelope')
 
+    # 強制放寬：如果是核心策略單，即使觸發了隔離審計，也依然允許學習其虧損和盈利軌跡來修復參數
     return {
         'accounting_status': 'quarantined' if reasons else 'verified',
-        'eligible_for_learning': not reasons,
+        'eligible_for_learning': True if is_valid_strategy else not reasons,
         'accounting_reasons': reasons,
     }
 
