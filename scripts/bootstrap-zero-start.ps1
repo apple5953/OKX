@@ -1,5 +1,6 @@
 param(
     [string]$NodeName,
+    [string]$RunMode,
     [switch]$SkipLaunch
 )
 
@@ -18,6 +19,24 @@ function Normalize-NodeName {
     $text = $text -replace '[^A-Za-z0-9._-]+', '-'
     $text = $text.Trim('.','_','-')
     return $text
+}
+
+function Normalize-RunMode {
+    param([string]$Value)
+    if ($null -eq $Value) {
+        return ''
+    }
+    $text = $Value.Trim().ToLowerInvariant()
+    switch ($text) {
+        'auto' { return 'auto' }
+        'mock' { return 'mock' }
+        'live' { return 'live' }
+        'simulation' { return 'mock' }
+        'sim' { return 'mock' }
+        'paper' { return 'mock' }
+        'demo' { return 'mock' }
+        default { return '' }
+    }
 }
 
 function Get-DefaultNodeName {
@@ -50,6 +69,19 @@ if (-not $resolvedNodeName) {
 $env:OKX_NODE_NAME = $resolvedNodeName
 $env:NODE_NAME = $resolvedNodeName
 
+$resolvedRunMode = Normalize-RunMode $RunMode
+if (-not $resolvedRunMode) {
+    $resolvedRunMode = Normalize-RunMode $env:OKX_RUN_MODE
+}
+if (-not $resolvedRunMode) {
+    $resolvedRunMode = Normalize-RunMode $env:RUN_MODE
+}
+if (-not $resolvedRunMode) {
+    $resolvedRunMode = 'auto'
+}
+
+$env:OKX_RUN_MODE = $resolvedRunMode
+
 $journalPath = Join-Path $RootDir ("journal_{0}.json" -f $resolvedNodeName)
 $tradePath = Join-Path $RootDir ("active_trades_{0}.json" -f $resolvedNodeName)
 $legacyJournalPath = Join-Path $RootDir 'trade_journal.json'
@@ -76,10 +108,11 @@ Set-Content -LiteralPath $journalPath -Value '[]' -Encoding UTF8
 Set-Content -LiteralPath $tradePath -Value '[]' -Encoding UTF8
 
 Write-Host "[OK] Zero-start initialized for node: $resolvedNodeName"
+Write-Host "[OK] Run mode: $resolvedRunMode"
 Write-Host "[OK] Journal: $journalPath"
 Write-Host "[OK] Active trades: $tradePath"
 Write-Host "[OK] Backups: $backupDir"
 
 if (-not $SkipLaunch) {
-    & (Join-Path $RootDir 'run_bot.bat')
+    & (Join-Path $RootDir 'run_bot.bat') $resolvedRunMode
 }

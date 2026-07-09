@@ -9,6 +9,11 @@
 ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$ROOT_DIR"
 
+RUN_MODE="${1:-${OKX_RUN_MODE:-}}"
+if [ -n "$RUN_MODE" ]; then
+    export OKX_RUN_MODE="$RUN_MODE"
+fi
+
 DEPS_DIR="$ROOT_DIR/.deps"
 PORTABLE_PY_DIR="$DEPS_DIR/python-portable"
 VENV_DIR="$DEPS_DIR/venv"
@@ -44,6 +49,10 @@ pip install ccxt pandas flask
 echo "==================================================="
 echo "[Success] Portable Sandbox ready! Starting bot..."
 echo "==================================================="
+
+if [ -n "${OKX_RUN_MODE:-}" ]; then
+    echo "[Info] Run mode: $OKX_RUN_MODE"
+fi
 
 # 4. Start the server
 python3 server.py

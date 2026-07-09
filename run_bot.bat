@@ -2,6 +2,11 @@
 setlocal enabledelayedexpansion
 title OKX V12 Harmonic Agent Portable Suite
 
+set "RUN_MODE=%~1"
+if not "%RUN_MODE%"=="" (
+    set "OKX_RUN_MODE=%RUN_MODE%"
+)
+
 echo ===================================================
 echo   OKX V12 Harmonic Agent - Portable Startup Script
 echo   Status: Pure Portable (No Install, No Admin Required)
@@ -68,6 +73,9 @@ echo ===================================================
 echo.
 
 :run_app
+if not "%OKX_RUN_MODE%"=="" (
+    echo [Info] Run mode: %OKX_RUN_MODE%
+)
 echo [Info] Booting OKX V12 Harmonic Agent...
 "%PYTHON_EXE%" server.py
 pause

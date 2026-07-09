@@ -33,6 +33,8 @@ export OKX_RUN_MODE=mock
 Windows users also have:
 
 - `set-run-mode.bat`
+- `run-mock.bat`
+- `run-live.bat`
 
 ## Credentials
 
@@ -118,6 +120,8 @@ Or double-click:
 - `set-node-name.bat`
 - `set-run-mode.bat`
 - `run-zero-start.bat`
+- `run-mock.bat`
+- `run-live.bat`
 
 macOS/Linux:
 
@@ -213,3 +217,10 @@ If you want a fresh download:
 - If a machine should be mock but starts trying to behave like live, set `OKX_RUN_MODE=mock` and restart.
 - If a machine must be live, confirm its OKX API key and whitelist first.
 - If the journals look polluted, run zero-start again so the machine starts from an empty local history.
+
+## Quick mode switching
+
+- Mock only: `run-mock.bat`
+- Live preferred: `run-live.bat`
+- Zero-start with a mode: `run-zero-start.bat macmini_02 mock`
+- Normal launch with a mode: `run_bot.bat mock` or `run_bot.bat live`

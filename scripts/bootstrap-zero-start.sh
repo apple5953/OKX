@@ -16,13 +16,21 @@ default_node_name() {
 }
 
 NODE_NAME="${1:-${OKX_NODE_NAME:-${NODE_NAME:-}}}"
+RUN_MODE="${2:-${OKX_RUN_MODE:-${RUN_MODE:-auto}}}"
 NODE_NAME="$(sanitize_node_name "$NODE_NAME")"
 if [ -z "$NODE_NAME" ]; then
     NODE_NAME="$(default_node_name)"
 fi
 
+case "$(printf '%s' "$RUN_MODE" | tr '[:upper:]' '[:lower:]')" in
+    mock|simulate|simulation|paper|demo) RUN_MODE="mock" ;;
+    live|real|production) RUN_MODE="live" ;;
+    *) RUN_MODE="auto" ;;
+esac
+
 export OKX_NODE_NAME="$NODE_NAME"
 export NODE_NAME="$NODE_NAME"
+export OKX_RUN_MODE="$RUN_MODE"
 
 journal_path="$ROOT_DIR/journal_${NODE_NAME}.json"
 trade_path="$ROOT_DIR/active_trades_${NODE_NAME}.json"
@@ -48,10 +56,11 @@ printf '[]\n' > "$journal_path"
 printf '[]\n' > "$trade_path"
 
 echo "[OK] Zero-start initialized for node: $NODE_NAME"
+echo "[OK] Run mode: $RUN_MODE"
 echo "[OK] Journal: $journal_path"
 echo "[OK] Active trades: $trade_path"
 echo "[OK] Backups: $backup_dir"
 
 if [ "${SKIP_LAUNCH:-0}" != "1" ]; then
-    bash "$ROOT_DIR/run_bot.sh"
+    bash "$ROOT_DIR/run_bot.sh" "$RUN_MODE"
 fi
