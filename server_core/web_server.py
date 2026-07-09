@@ -150,11 +150,12 @@ def api_git_pull():
         # 1. 優先嘗試標準的 Git Pull (如果本機有 Git 且是在 Git 倉庫內)
         has_git = False
         try:
-            # 測試系統是否有 git 指令
-            subprocess.run(['git', '--version'], capture_output=True)
-            has_git = Path(config.PROJECT_DIR).joinpath('.git').exists()
-        except Exception:
-            pass
+            # 測試系統是否有 git 指令，在沒有 git.exe 的系統上這會直接拋出 FileNotFoundError (WinError 2)
+            res = subprocess.run(['git', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0:
+                has_git = Path(config.PROJECT_DIR).joinpath('.git').exists()
+        except (FileNotFoundError, Exception):
+            has_git = False
 
         if has_git:
             # 使用當前使用的分支或預設分支上游更新
