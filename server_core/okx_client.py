@@ -21,7 +21,7 @@ except Exception:
     pass
 
 # 自動檢測是否有填寫 API Key 且連線可用，若失敗則自動切換至 MOCK 本地模擬模式
-if not config.OKX_API_KEY or config.OKX_API_KEY.startswith("YOUR_") or config.OKX_API_KEY == 'f1b9af15-e584-4911-b949-ff42168fd53c_PLACEHOLDER':
+if not config.OKX_API_KEY or config.OKX_API_KEY.startswith("YOUR_") or config.OKX_API_KEY == 'OKX_API_KEY_PLACEHOLDER':
     config.MOCK_MODE = True
     print("[🛡️ SYSTEM CONFIG] 未設置有效 OKX API 金鑰，已自動開啟 MOCK_MODE (本地模擬交易模式)。")
 else:

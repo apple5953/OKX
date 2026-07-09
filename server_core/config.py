@@ -14,6 +14,19 @@ def _sanitize_node_name(value):
     return text.strip('.-_')
 
 
+def _env_flag(name):
+    return str(os.getenv(name, '')).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def resolve_run_mode():
+    raw = str(os.getenv('OKX_RUN_MODE') or os.getenv('RUN_MODE') or 'auto').strip().lower()
+    if raw in {'mock', 'simulate', 'simulation', 'paper', 'demo'}:
+        return 'mock'
+    if raw in {'live', 'real', 'production'}:
+        return 'live'
+    return 'auto'
+
+
 def resolve_node_name():
     explicit = _sanitize_node_name(os.getenv('OKX_NODE_NAME') or os.getenv('NODE_NAME'))
     if explicit:
@@ -26,9 +39,13 @@ def resolve_node_name():
 
     return f'node-{uuid.getnode():012x}'
 
-OKX_API_KEY = 'f1b9af15-e584-4911-b949-ff42168fd53c'
-OKX_SECRET = 'A64C98D3C5E8B38A963566313BA31EF1'
-OKX_PASSWORD = '@Sweetsweet556'
+OKX_API_KEY = os.getenv('OKX_API_KEY', '').strip()
+OKX_SECRET = os.getenv('OKX_API_SECRET', os.getenv('OKX_SECRET', '')).strip()
+OKX_PASSWORD = os.getenv('OKX_PASSPHRASE', os.getenv('OKX_PASSWORD', '')).strip()
+RUN_MODE = resolve_run_mode()
+FORCE_MOCK_MODE = RUN_MODE == 'mock' or _env_flag('OKX_FORCE_MOCK') or _env_flag('OKX_SIMULATION_MODE')
+MOCK_MODE = FORCE_MOCK_MODE
+# OKX_RUN_MODE=mock keeps a machine in simulation-only mode.
 
 # 本地模擬交易模式 (MOCK_MODE): 
 # 若為 True，或 API 金鑰留空/無效時，機器人會轉為「本地虛擬開平倉」，不發送真實訂單到 OKX，專門用於無白名單權限的電腦進行訓練。

@@ -67,9 +67,9 @@ def get_confidence_score(strategy_name, category):
 
 # OKX API configuration (Loaded from CLI profile okx-demo)
 okx = ccxt.okx({
-    'apiKey': 'f1b9af15-e584-4911-b949-ff42168fd53c',
-    'secret': 'A64C98D3C5E8B38A963566313BA31EF1',
-    'password': '@Sweetsweet556',
+    'apiKey': os.getenv('OKX_API_KEY', ''),
+    'secret': os.getenv('OKX_API_SECRET', os.getenv('OKX_SECRET', '')),
+    'password': os.getenv('OKX_PASSPHRASE', os.getenv('OKX_PASSWORD', '')),
     'enableRateLimit': True,
 })
 # Set CCXT to use the demo environment (Simulated Trading)
@@ -135,7 +135,7 @@ def get_top_symbols_and_categories():
             
             # Majors
             if sym_clean in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
-                categories[sym] = "主流大餅 (Majors)"
+                categories[sym] = "主�?大�? (Majors)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -143,7 +143,7 @@ def get_top_symbols_and_categories():
             fr = funding.get(sym, {}).get('fundingRate', 0)
             if fr is None: fr = 0
             if fr and (fr < -0.0005 or fr > 0.0005):
-                categories[sym] = "極端費率 (Squeeze Watch)"
+                categories[sym] = "極端費�? (Squeeze Watch)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -151,13 +151,13 @@ def get_top_symbols_and_categories():
             pct = t.get('percentage', 0)
             if pct is None: pct = 0
             if pct > btc_pct + 5: # Outperforming BTC by 5%
-                categories[sym] = "Alpha 強勢幣 (Rel. Strength)"
+                categories[sym] = "Alpha 強勢�?(Rel. Strength)"
                 selected_symbols.append(sym)
                 continue
                 
             # Deep Oversold
             if pct < -5:
-                categories[sym] = "深跌超賣 (Deep Oversold)"
+                categories[sym] = "深�?超賣 (Deep Oversold)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -167,7 +167,7 @@ def get_top_symbols_and_categories():
             if high is None: high = 0
             if low is None: low = 0
             if low > 0 and ((high - low) / low) > 0.10:
-                categories[sym] = "高波動狙擊 (High Volatility)"
+                categories[sym] = "高波?��???(High Volatility)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -176,7 +176,7 @@ def get_top_symbols_and_categories():
             if len(selected_symbols) >= 200: break
             sym = t['symbol']
             if sym not in selected_symbols:
-                categories[sym] = "普通高量 (High Volume)"
+                categories[sym] = "?�通�???(High Volume)"
                 selected_symbols.append(sym)
                 
         return selected_symbols[:80], categories
@@ -359,7 +359,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         'rsi': round(df['rsi'].iloc[-1], 1) if pd.notna(df['rsi'].iloc[-1]) else 50,
                         'pattern': 'None',
                         'score': 0,
-                        'trigger_reason': '掃描型態中 (Scanning)',
+                        'trigger_reason': '?��??��?�?(Scanning)',
                         'strategy': strategy_name,
                         'active_tolerance': round(active_tolerance, 3),
                         'active_sl_buffer': round(active_sl_buffer, 3),
@@ -377,12 +377,12 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         in_prz = (best_p.prz_low - buffer) <= d_price <= (best_p.prz_high + buffer)
                         if in_prz:
                             radar_item['score'] = 100
-                            radar_item['trigger_reason'] = 'PRZ 抵達！等待指標共振進場'
+                            radar_item['trigger_reason'] = 'PRZ ?��?！�?待�?標共?�進場'
                         else:
                             dist = min(abs(d_price - best_p.prz_low), abs(d_price - best_p.prz_high))
                             radar_item['score'] = max(10, int(100 - (dist / d_price) * 1000))
-                            direction = "做多" if best_p.direction == 'bullish' else "做空"
-                            radar_item['trigger_reason'] = f"等待 D 點{direction}至 {best_p.prz_center:.4g}"
+                            direction = "?��?" if best_p.direction == 'bullish' else "?�空"
+                            radar_item['trigger_reason'] = f"等�? D 點{direction}??{best_p.prz_center:.4g}"
                             
                     current_radar.append(radar_item)
                     
@@ -447,29 +447,29 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         
                         block_reason = None
                         if not sl_valid or not tp_valid:
-                            block_reason = "API 參數無效 (止損/止盈方向錯誤)"
+                            block_reason = "API ?�數?��? (止�?/止�??��??�誤)"
                         elif not in_prz:
-                            block_reason = "未進入 PRZ 區間"
+                            block_reason = "?�進入 PRZ ?�??
                         else:
                             # Apply Strategy-Specific Logic
-                            t_dir = '空' if htf_bear and not htf_bull else ('多' if htf_bull and not htf_bear else '盤')
+                            t_dir = '�? if htf_bear and not htf_bull else ('�? if htf_bull and not htf_bear else '??)
                             
                             if strategy_name == 'MacroSniper':
                                 # Strict Patient Killer: Requires Trend + Institutional
                                 if not trend_ok:
-                                    block_reason = f"大級別趨勢不符 ({trend_tf} {t_dir})"
+                                    block_reason = f"大�??�趨?��?�?({trend_tf} {t_dir})"
                                 elif not div_ok and not sweep_ok:
-                                    block_reason = "缺乏機構信號 (無背離/無掃蕩)"
+                                    block_reason = "缺�?機�?信�? (?��????��???"
                                     
                             elif strategy_name == 'MeanReversion':
                                 # Range Scalper: Requires Trend, ignores Institutional
                                 if not trend_ok:
-                                    block_reason = f"大級別趨勢不符 ({trend_tf} {t_dir})"
+                                    block_reason = f"大�??�趨?��?�?({trend_tf} {t_dir})"
                                     
                             elif strategy_name == 'Contrarian':
                                 # Falling Knife Catcher: Ignores Trend, REQUIRES Institutional confirmation
                                 if not div_ok and not sweep_ok:
-                                    block_reason = "缺乏反轉信號 (無背離/無掃蕩)"
+                                    block_reason = "缺�??��?信�? (?��????��???"
                                     
                             elif strategy_name == 'SqueezeHunter':
                                 # Volatility Surfer: Pure PRZ edge bounce (Fastest execution)
@@ -481,9 +481,9 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                             
                             profit_pct = abs(plan["tp1"] - current_price) / current_price
                             if profit_pct < active_min_profit:
-                                block_reason = f"利潤空間太小 (<{(active_min_profit*100):.2f}%)"
+                                block_reason = f"?�潤空�?太�? (<{(active_min_profit*100):.2f}%)"
                             elif true_rr < target_rr:
-                                block_reason = f"真實盈虧比過低 ({round(true_rr, 2)} < {target_rr})"
+                                block_reason = f"?�實?�虧比�?�?({round(true_rr, 2)} < {target_rr})"
                                 
                         display_sym = symbol.replace(':USDT', '').replace('/', '')
                         already_active = any(t['symbol'] == display_sym and t['status'] == 'active' for t in active_trades)
@@ -511,7 +511,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         if symbol in cooldowns and (time.time() - cooldowns[symbol] < COOLDOWN_SECONDS):
                             on_cooldown = True
                             if not block_reason:
-                                block_reason = "進場冷卻中"
+                                block_reason = "?�場?�卻�?
                                 signal_obj["block_reason"] = block_reason
                         
                         if not block_reason and not already_active and not on_cooldown:
@@ -603,7 +603,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                 # ONLY append to UI after OKX confirms execution!
                                 cooldowns[symbol] = time.time()
                                 signal_obj["status"] = "active"
-                                signal_obj["entry_reason"] = f"觸發 {p.pattern_name} (指標共振/趨勢吻合)"
+                                signal_obj["entry_reason"] = f"觸發 {p.pattern_name} (?��??�振/趨勢?��?)"
                                 active_trades.append(signal_obj)
                                 # Garbage collection
                                 if len(active_trades) > 1000:
@@ -724,7 +724,7 @@ def background_sync_loop():
                             if a.get('slTriggerPx') and float(a['slTriggerPx']) > 0: t['sl'] = float(a['slTriggerPx'])
                             if a.get('tpTriggerPx') and float(a['tpTriggerPx']) > 0: t['tp1'] = float(a['tpTriggerPx'])
                         
-                        # 🏃 DYNAMIC TRAILING STOP MECHANISM (動態追蹤止盈)
+                        # ?? DYNAMIC TRAILING STOP MECHANISM (?��?追蹤止�?)
                         if t.get('tp1') and t.get('sl') and t.get('entry'):
                             # Original theoretical distance to TP1
                             if 'original_tp_dist' not in t:
@@ -776,16 +776,16 @@ def background_sync_loop():
                                         # REAL-TIME PRICE VALIDATION
                                         if (t['direction'] == 'long' and new_sl >= t['current']) or \
                                            (t['direction'] == 'short' and new_sl <= t['current']):
-                                            print(f"[🚨 EMERGENCY] {t['symbol']} trailing SL {new_sl} already breached by market {t['current']}. Closing immediately!")
+                                            print(f"[?�� EMERGENCY] {t['symbol']} trailing SL {new_sl} already breached by market {t['current']}. Closing immediately!")
                                             try:
                                                 ccxt_sym = (t.get('instId') or (t['symbol'].replace('USDT', '') + "-USDT-SWAP")).replace("-USDT-SWAP", "/USDT:USDT")
                                                 close_side = 'sell' if t['direction'] == 'long' else 'buy'
                                                 pos = okx.fetch_position(ccxt_sym)
                                                 if pos and pos.get('contracts') and float(pos['contracts']) > 0:
                                                     okx.create_order(ccxt_sym, 'market', close_side, pos['contracts'], None, {'tdMode': 'cross', 'reduceOnly': True})
-                                                    print(f"[🚨 EMERGENCY] {t['symbol']} closed successfully to prevent OKX Error 51278.")
+                                                    print(f"[?�� EMERGENCY] {t['symbol']} closed successfully to prevent OKX Error 51278.")
                                                 else:
-                                                    print(f"[🚨 EMERGENCY] {t['symbol']} position not found or already closed.")
+                                                    print(f"[?�� EMERGENCY] {t['symbol']} position not found or already closed.")
                                             except Exception as e:
                                                 print(f"[ERROR] Emergency close failed for {t['symbol']}: {e}")
                                             # Skip amend as position is closed
@@ -815,12 +815,12 @@ def background_sync_loop():
                                                     amend_payload["newTpTriggerPx"] = formatted_far_tp
                                                     amend_payload["newTpOrdPx"] = "-1"
                                                     t['tp_removed'] = True
-                                                    print(f"[🚀 INFINITE RUN] {t['symbol']} TP ceiling removed! Let profits run.")
+                                                    print(f"[?? INFINITE RUN] {t['symbol']} TP ceiling removed! Let profits run.")
 
                                                 # OKX Amend API
                                                 res = okx.private_post_trade_amend_algos(amend_payload)
                                                 if res.get('code') == '0':
-                                                    print(f"[🛡️ TRAILING STOP] {t['symbol']} SL moved to: {formatted_sl} (Progress: {highest_progress*100:.1f}%)")
+                                                    print(f"[?���?TRAILING STOP] {t['symbol']} SL moved to: {formatted_sl} (Progress: {highest_progress*100:.1f}%)")
                                                     t['sl'] = new_sl
                                                 else:
                                                     print(f"[ERROR] Amend failed for {t['symbol']}: {res}")
@@ -908,7 +908,7 @@ def api_journal():
 def api_intelligence():
     # Provide the selection logic and the current active array of tracked coins
     return jsonify({
-        'logic': '每 60 分鐘自動向 OKX 交易所請求前 100 大流動性合約，並透過高手獨家演算法(資金費率異常、相對大盤強弱、極端波動)篩選出最適合諧波交易的 30 大金剛陣容。',
+        'logic': '�?60 ?��??��???OKX 交�??�請�???100 大�??�性�?約�?並透�?高�??�家演�?�?資�?費�??�常?�相對大?�強弱、極端波??篩選?��??��?諧波交�???30 大�??�陣容�?,
         'symbols': [s.split('/')[0] for s in globals().get('global_symbols', [])],
         'categories': {k.split('/')[0]: v for k, v in globals().get('global_symbol_categories', {}).items()}
     })

@@ -1,9 +1,9 @@
 import ccxt
 import os
 okx = ccxt.okx({
-    'apiKey': 'f1b9af15-e584-4911-b949-ff42168fd53c',
-    'secret': 'A64C98D3C5E8B38A963566313BA31EF1',
-    'password': '@Sweetsweet556',
+    'apiKey': os.getenv('OKX_API_KEY', ''),
+    'secret': os.getenv('OKX_API_SECRET', os.getenv('OKX_SECRET', '')),
+    'password': os.getenv('OKX_PASSPHRASE', os.getenv('OKX_PASSWORD', '')),
     'enableRateLimit': True,
 })
 okx.set_sandbox_mode(True)
