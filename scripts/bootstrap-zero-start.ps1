@@ -30,11 +30,13 @@ function Normalize-RunMode {
     switch ($text) {
         'auto' { return 'auto' }
         'mock' { return 'mock' }
+        'demo' { return 'demo' }
         'live' { return 'live' }
         'simulation' { return 'mock' }
         'sim' { return 'mock' }
         'paper' { return 'mock' }
-        'demo' { return 'mock' }
+        'sandbox' { return 'demo' }
+        'testnet' { return 'demo' }
         default { return '' }
     }
 }

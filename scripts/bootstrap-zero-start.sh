@@ -23,7 +23,8 @@ if [ -z "$NODE_NAME" ]; then
 fi
 
 case "$(printf '%s' "$RUN_MODE" | tr '[:upper:]' '[:lower:]')" in
-    mock|simulate|simulation|paper|demo) RUN_MODE="mock" ;;
+    mock|simulate|simulation|paper) RUN_MODE="mock" ;;
+    demo|sandbox|testnet) RUN_MODE="demo" ;;
     live|real|production) RUN_MODE="live" ;;
     *) RUN_MODE="auto" ;;
 esac

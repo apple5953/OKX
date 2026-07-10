@@ -54,5 +54,17 @@ if [ -n "${OKX_RUN_MODE:-}" ]; then
     echo "[Info] Run mode: $OKX_RUN_MODE"
 fi
 
+# Open the local UI after startup unless explicitly disabled.
+if [ "${OKX_OPEN_UI:-1}" != "0" ]; then
+    (
+        sleep 4
+        if command -v open >/dev/null 2>&1; then
+            open "http://127.0.0.1:5000" >/dev/null 2>&1
+        elif command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "http://127.0.0.1:5000" >/dev/null 2>&1
+        fi
+    ) >/dev/null 2>&1 &
+fi
+
 # 4. Start the server
 python3 server.py

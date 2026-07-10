@@ -284,12 +284,12 @@ def get_top_symbols_and_categories():
         ])
         usdt_swaps = [v for k, v in tickers.items() if k in swap_symbols]
         sorted_swaps = sorted(usdt_swaps, key=lambda x: float(x.get('quoteVolume', 0) or 0), reverse=True)
-        top_150 = sorted_swaps[:150]
+        top_200 = sorted_swaps[:200]
         
         btc_pct = tickers.get('BTC/USDT:USDT', {}).get('percentage', 0)
         if btc_pct is None: btc_pct = 0
         
-        for t in top_150:
+        for t in top_200:
             sym = t['symbol']
             sym_clean = sym.replace(':USDT', '').replace('/', '')
             if sym in selected_symbols: continue
@@ -327,14 +327,14 @@ def get_top_symbols_and_categories():
                 selected_symbols.append(sym)
                 continue
                 
-        for t in top_150:
-            if len(selected_symbols) >= 120: break
+        for t in top_200:
+            if len(selected_symbols) >= 100: break
             sym = t['symbol']
             if sym not in selected_symbols:
                 categories[sym] = "普通高量 (High Volume)"
                 selected_symbols.append(sym)
                 
-        return selected_symbols[:120], categories
+        return selected_symbols[:100], categories
     except Exception as e:
         print(f"Error fetching top symbols: {e}")
         categories = {sym: 'Majors' for sym in config.FALLBACK_SCAN_SYMBOLS}

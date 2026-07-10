@@ -334,6 +334,43 @@ def build_training_optimizer(strategy_name, perf=None, cycle_state=None):
     }
     return tuned
 
+
+def _looks_bot_generated_history_row(row):
+    if not isinstance(row, dict):
+        return False
+
+    strategy = str(row.get('strategy') or '')
+    if strategy in config.STRATEGY_PROFILES:
+        return True
+
+    bot_markers = (
+        'strategy_version',
+        'optimizer',
+        'runner_policy',
+        'mode_reason',
+        'entry_reason',
+        'setup_source',
+        'execution_mode',
+        'live_permission',
+        'lifecycle_id',
+        'signal_candle',
+    )
+    return any(row.get(marker) not in [None, '', [], {}] for marker in bot_markers)
+
+
+def _is_explicit_manual_history_row(row):
+    if not isinstance(row, dict):
+        return False
+
+    manual_markers = (
+        row.get('trade_source'),
+        row.get('execution_source'),
+        row.get('operator'),
+        row.get('origin'),
+        row.get('created_by'),
+    )
+    return any(str(marker).strip().lower() in {'manual', 'human', 'user'} for marker in manual_markers if marker is not None)
+
 def write_global_optimizer_manifest(optimizers, cycle_state=None):
     payload = {}
     for name, opt in optimizers.items():
@@ -362,7 +399,7 @@ def run_training_cycle(force_history=False):
             for row in reversed(state.trade_journal or [])
             if row.get('status') == 'closed' or row.get('closed_at')
         ]
-    manual_rows = [row for row in history if str(row.get('strategy') or '') == 'Manual']
+    manual_rows = [row for row in history if _is_explicit_manual_history_row(row)]
     total_history = len(history)
     manual_ratio = (len(manual_rows) / total_history) if total_history else 0.0
 
@@ -409,7 +446,7 @@ def run_training_cycle(force_history=False):
             'source': 'manual_history',
             'severity': round(manual_ratio, 4),
             'value': len(manual_rows),
-            'detail': f'{len(manual_rows)} / {total_history} history rows are Manual',
+            'detail': f'{len(manual_rows)} / {total_history} history rows have explicit human markers',
         },
         {
             'source': 'portfolio_expectancy',

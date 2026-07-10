@@ -3,7 +3,7 @@ setlocal
 set "ROOT_DIR=%~dp0"
 set "RUN_MODE=%~1"
 if "%RUN_MODE%"=="" (
-    set /p RUN_MODE=Enter run mode (auto / mock / live): 
+    set /p RUN_MODE=Enter run mode (auto / mock / demo / live): 
 )
 if "%RUN_MODE%"=="" (
     echo [Error] Run mode cannot be empty.

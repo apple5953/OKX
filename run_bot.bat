@@ -54,6 +54,7 @@ del /f /q "%DEPS_DIR%\python-portable.zip"
 set "PTH_FILE=%PORTABLE_PYTHON_DIR%\python312._pth"
 if exist "%PTH_FILE%" (
     echo import site >> "%PTH_FILE%"
+    findstr /x /c:"..\.." "%PTH_FILE%" >nul 2>nul || echo ..\..>> "%PTH_FILE%"
 )
 
 :: 3. Download & Configure pip (python packaging utility)
@@ -77,5 +78,9 @@ if not "%OKX_RUN_MODE%"=="" (
     echo [Info] Run mode: %OKX_RUN_MODE%
 )
 echo [Info] Booting OKX V12 Harmonic Agent...
+if not "%OKX_OPEN_UI%"=="0" (
+    echo [Info] UI will open at http://127.0.0.1:5000
+    start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://127.0.0.1:5000'"
+)
 "%PYTHON_EXE%" server.py
 pause

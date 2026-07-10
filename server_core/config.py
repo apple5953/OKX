@@ -5,6 +5,11 @@ import socket
 import uuid
 from pathlib import Path
 
+try:
+    import tomllib as _tomllib
+except Exception:
+    _tomllib = None
+
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE_DIR = PROJECT_DIR.parent
 
@@ -18,12 +23,66 @@ def _env_flag(name):
     return str(os.getenv(name, '')).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
 
 
+def _first_non_empty(*values):
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def load_okx_profile_config():
+    candidate_paths = []
+    env_path = _first_non_empty(os.getenv('OKX_CONFIG_PATH'), os.getenv('OKX_CONFIG_TOML'))
+    if env_path:
+        candidate_paths.append(Path(env_path).expanduser())
+    candidate_paths.append(Path.home() / '.okx' / 'config.toml')
+
+    for path in candidate_paths:
+        if not path.exists() or _tomllib is None:
+            continue
+        try:
+            with open(path, 'rb') as f:
+                payload = _tomllib.load(f)
+        except Exception:
+            continue
+
+        profiles = payload.get('profiles') if isinstance(payload, dict) else None
+        if not isinstance(profiles, dict) or not profiles:
+            continue
+
+        default_profile = _first_non_empty(payload.get('default_profile'))
+        profile_name = default_profile if default_profile in profiles else next(iter(profiles.keys()))
+        profile = profiles.get(profile_name) if isinstance(profiles.get(profile_name), dict) else None
+        if not isinstance(profile, dict):
+            continue
+
+        return {
+            'path': str(path),
+            'profile_name': profile_name,
+            'api_key': _first_non_empty(profile.get('api_key'), profile.get('apiKey')),
+            'secret': _first_non_empty(profile.get('secret_key'), profile.get('secret'), profile.get('api_secret')),
+            'password': _first_non_empty(profile.get('passphrase'), profile.get('password')),
+            'demo': bool(profile.get('demo')),
+            'site': _first_non_empty(profile.get('site'), payload.get('site'), 'global'),
+        }
+
+    return {}
+
+
+OKX_PROFILE = load_okx_profile_config()
+
+
 def resolve_run_mode():
     raw = str(os.getenv('OKX_RUN_MODE') or os.getenv('RUN_MODE') or 'auto').strip().lower()
-    if raw in {'mock', 'simulate', 'simulation', 'paper', 'demo'}:
+    if raw in {'mock', 'simulate', 'simulation', 'paper'}:
         return 'mock'
+    if raw in {'demo', 'sandbox', 'testnet'}:
+        return 'demo'
     if raw in {'live', 'real', 'production'}:
         return 'live'
+    if OKX_PROFILE.get('demo'):
+        return 'demo'
     return 'auto'
 
 
@@ -39,17 +98,19 @@ def resolve_node_name():
 
     return f'node-{uuid.getnode():012x}'
 
-OKX_API_KEY = os.getenv('OKX_API_KEY', '').strip()
-OKX_SECRET = os.getenv('OKX_API_SECRET', os.getenv('OKX_SECRET', '')).strip()
-OKX_PASSWORD = os.getenv('OKX_PASSPHRASE', os.getenv('OKX_PASSWORD', '')).strip()
+OKX_API_KEY = _first_non_empty(os.getenv('OKX_API_KEY'), OKX_PROFILE.get('api_key'))
+OKX_SECRET = _first_non_empty(os.getenv('OKX_API_SECRET'), os.getenv('OKX_SECRET'), OKX_PROFILE.get('secret'))
+OKX_PASSWORD = _first_non_empty(os.getenv('OKX_PASSPHRASE'), os.getenv('OKX_PASSWORD'), OKX_PROFILE.get('password'))
+OKX_SITE = _first_non_empty(os.getenv('OKX_SITE'), OKX_PROFILE.get('site'))
 RUN_MODE = resolve_run_mode()
 FORCE_MOCK_MODE = RUN_MODE == 'mock' or _env_flag('OKX_FORCE_MOCK') or _env_flag('OKX_SIMULATION_MODE')
 MOCK_MODE = FORCE_MOCK_MODE
-# OKX_RUN_MODE=mock keeps a machine in simulation-only mode.
+DEMO_MODE = RUN_MODE == 'demo'
+LIVE_MODE = RUN_MODE == 'live'
+OKX_SANDBOX_MODE = DEMO_MODE or _env_flag('OKX_FORCE_SANDBOX') or bool(OKX_PROFILE.get('demo'))
 
 # 本地模擬交易模式 (MOCK_MODE): 
 # 若為 True，或 API 金鑰留空/無效時，機器人會轉為「本地虛擬開平倉」，不發送真實訂單到 OKX，專門用於無白名單權限的電腦進行訓練。
-MOCK_MODE = False
 
 BASE_MARGIN_USDT = 60.0
 STRATEGY_VERSION = 'v12'

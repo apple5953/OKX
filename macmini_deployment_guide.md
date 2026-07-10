@@ -55,6 +55,14 @@ The bootstrap script will:
 - back up legacy `active_trades.json`
 - create fresh empty JSON files for the current node
 
+If you want to keep the old machine's history instead of starting fresh, copy these files before first launch:
+
+- `journal_<NODE_NAME>.json`
+- `active_trades_<NODE_NAME>.json`
+- `backups/`
+
+Do not use `trade_journal.json` or `active_trades.json` as the main source of truth on the new machine.
+
 If you only want to set the machine name without zero-starting, use:
 
 ```powershell
@@ -75,6 +83,8 @@ macOS/Linux:
 ./run_bot.sh
 ```
 
+The UI opens automatically at `http://127.0.0.1:5000` unless you set `OKX_OPEN_UI=0`.
+
 ## 5. What gets trained
 
 - Local journal file: `journal_<NODE_NAME>.json`
@@ -89,11 +99,24 @@ macOS/Linux:
 - Do not commit `active_trades_*.json`.
 - Commit only the journal output files.
 
-## 7. Troubleshooting
+## 8. Google OAuth 授權安全設定
 
-If a machine appears to inherit old data:
+為了防止 Google Client ID/Secret 金鑰在 GitHub 上被公開洩露，我們採用環境變數安全設計。在新電腦（如 Mac mini）上啟動前，請先配置以下環境變數：
 
-1. Stop the bot.
-2. Run the zero-start bootstrap again with the correct node name.
-3. Check that the new journal file is empty before normal launch.
-4. Confirm the current node name is what you expected.
+### 執行環境變數設定
+
+在執行後端認證服務前，請設定您的 Google OAuth 用戶端密鑰：
+
+**Windows (PowerShell)**:
+```powershell
+$env:GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID"
+$env:GOOGLE_CLIENT_SECRET = "YOUR_GOOGLE_CLIENT_SECRET"
+```
+
+**macOS / Linux (Bash/Zsh)**:
+```bash
+export GOOGLE_CLIENT_ID="YOUR_GOOGLE_CLIENT_ID"
+export GOOGLE_CLIENT_SECRET="YOUR_GOOGLE_CLIENT_SECRET"
+```
+
+設定完成後，再啟動授權後端 `python auth_server/server.py` 與機器人即可安全運行。
