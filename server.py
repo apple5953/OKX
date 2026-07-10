@@ -96,6 +96,55 @@ if __name__ == '__main__':
             except Exception:
                 pass
                 
+    # Start Cloud Session Heartbeat Tracker to record login times and device session runtimes
+    email_addr = "unknown"
+    token_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_token.json")
+    if os.path.exists(token_path):
+        try:
+            with open(token_path, "r", encoding="utf-8") as f:
+                email_addr = json.load(f).get("email", "unknown")
+        except Exception:
+            pass
+
+    class CloudSessionTracker:
+        def __init__(self, node_name, email):
+            self.node_name = node_name
+            self.email = email
+            self.gas_url = "https://script.google.com/macros/s/AKfycbwd75y2vsmgA7g0AtNxqiCSLkqT4Ied1n-nV5JpOy__gM3bB8pWqNw6PZiyWpbrNeSjqg/exec"
+
+        def send_status(self, status="active"):
+            def run():
+                payload = {
+                    "action": "log_session",
+                    "node_name": self.node_name,
+                    "email": self.email,
+                    "status": status
+                }
+                try:
+                    req = urllib.request.Request(
+                        self.gas_url,
+                        data=json.dumps(payload).encode('utf-8'),
+                        headers={'Content-Type': 'application/json'},
+                        method='POST'
+                    )
+                    urllib.request.urlopen(req)
+                except Exception:
+                    pass
+            threading.Thread(target=run, daemon=True).start()
+
+        def start_heartbeat_loop(self):
+            self.send_status("active")
+            def loop():
+                while True:
+                    time.sleep(300)  # Heartbeat every 5 minutes
+                    self.send_status("active")
+            threading.Thread(target=loop, daemon=True).start()
+
+    import urllib.request
+    import json
+    tracker = CloudSessionTracker(config.NODE_NAME, email_addr)
+    tracker.start_heartbeat_loop()
+
     threading.Thread(target=update_symbols_loop, daemon=True).start()
     threading.Thread(target=engine.background_sync_loop, daemon=True).start()
     threading.Thread(target=strategies.training_loop, kwargs={'interval_seconds': 600}, daemon=True).start()

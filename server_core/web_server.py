@@ -68,6 +68,18 @@ def build_runtime_status_v2():
             'whitelist_required': False,
         }
 
+    if config.RUN_MODE == 'demo' or config.DEMO_MODE:
+        return {
+            'node_name': node_name,
+            'run_mode': 'demo',
+            'label': '模擬實盤 (Demo)',
+            'summary': f"模擬實盤｜{node_name}｜{'API已設定' if credentials_ready else 'API未設定'}",
+            'tone': 'live',
+            'detail': '目前連接到 OKX 模擬盤 (Sandbox/Demo) 執行模擬實盤交易。',
+            'credentials_ready': credentials_ready,
+            'whitelist_required': False,
+        }
+
     if config.RUN_MODE == 'live':
         return {
             'node_name': node_name,
