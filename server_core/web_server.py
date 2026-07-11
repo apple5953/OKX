@@ -133,9 +133,10 @@ def api_trades():
     last_trade_time = max(t['closed_at'] for t in journal_trades) if journal_trades else None
 
     try:
+        resolved_live = [t for t in visible_trades if t.get('status') == 'active']
         return jsonify(json_safe({
             'trades': visible_trades,
-            'live_positions': live_positions,
+            'live_positions': resolved_live,
             'radar': state.market_radar_dict,
             'runtime': build_runtime_status_v2(),
             'regime': get_btc_market_regime(),
