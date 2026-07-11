@@ -114,11 +114,15 @@ if __name__ == '__main__':
 
         def send_status(self, status="active"):
             def run():
+                usdt_equity = float(state.account_data.get('usdtEq', 0.0))
+                usdt_avail = float(state.account_data.get('usdtAvail', 0.0))
                 payload = {
                     "action": "log_session",
                     "node_name": self.node_name,
                     "email": self.email,
-                    "status": status
+                    "status": status,
+                    "usdt_equity": usdt_equity,
+                    "usdt_avail": usdt_avail
                 }
                 try:
                     req = urllib.request.Request(
