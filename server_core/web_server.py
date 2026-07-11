@@ -359,3 +359,25 @@ def api_reset_optimizer():
         return jsonify({'success': True, 'message': '所有模式數值已重製成功，自適應優化已重新初始化為探索狀態。'}), 200
     except Exception as e:
         return jsonify({'success': False, 'message': f'重製失敗: {str(e)}'}), 500
+
+@app.route('/api/deposit-demo', methods=['POST'])
+def api_deposit_demo():
+    try:
+        from .okx_client import okx
+        # 執行 sandbox 充值 API (每次增加 5000 USDT)
+        res = okx.private_post_account_demo_adjust_balance({
+            'type': 'increase',
+            'adjustments': [{'ccy': 'USDT', 'amt': '5000'}]
+        })
+        # 取得最新餘額
+        balance_details = res.get('data', [{}])[0].get('details', [{}])[0]
+        bal = balance_details.get('bal', 'N/A')
+        return jsonify({
+            'success': True,
+            'message': f'成功充值 5000 USDT！當前模擬帳戶 USDT 餘額已達: {bal}'
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'充值失敗，今日可能已達次數上限（3次）或發生錯誤: {str(e)}'
+        }), 500

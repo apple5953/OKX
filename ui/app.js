@@ -1435,3 +1435,36 @@ async function resetOptimizer() {
         }
     }
 }
+
+async function depositDemoAsset() {
+    const btn = document.getElementById('deposit-demo-btn');
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+        btn.innerHTML = '<span>💵 正在充值...</span>';
+    }
+
+    try {
+        const response = await fetch('/api/deposit-demo', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+        alert(data.message);
+        if (response.ok && data.success) {
+            location.reload();
+        }
+    } catch (err) {
+        alert(`連接伺服器失敗: ${err.message}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.innerHTML = originalText;
+        }
+    }
+}
