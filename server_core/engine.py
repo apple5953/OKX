@@ -263,7 +263,7 @@ def overlay_live_position_metadata(live_pos, tracked_trade=None):
     else:
         record.update({
             'strategy': 'Bot',
-            'pattern': '機器人 / 未分類',
+            'pattern': 'live position without journal record',
             'trailing_stage': 'waiting',
             'runner_policy': None,
             'protection_status': 'unconfirmed',
@@ -305,7 +305,7 @@ def build_live_trade_snapshot(tracked_records=None, live_positions=None, include
             if fallback_strategy:
                 fake_tracked = {
                     'strategy': fallback_strategy,
-                    'pattern': f'{fallback_strategy} / 歷史記錄恢復',
+                    'pattern': f'{fallback_strategy} / 甇瑕閮??Ｗ儔',
                     'trailing_stage': 'waiting',
                     'sync_status': 'journal_recovered',
                 }
@@ -479,7 +479,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         'rsi': round(signal_df['rsi'].iloc[-1], 1) if pd.notna(signal_df['rsi'].iloc[-1]) else 50,
                         'pattern': 'None',
                         'score': 0,
-                        'trigger_reason': '掃描型態中 (Scanning)',
+                        'trigger_reason': '????銝?(Scanning)',
                         'strategy': strategy_name,
                         'active_tolerance': round(active_tolerance, 3),
                         'active_sl_buffer': round(active_sl_buffer, 3),
@@ -525,12 +525,12 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         in_prz = (best_p.prz_low - buffer) <= live_price <= (best_p.prz_high + buffer)
                         if in_prz:
                             radar_item['score'] = 100
-                            radar_item['trigger_reason'] = 'PRZ 抵達！等待指標共振進場'
+                            radar_item['trigger_reason'] = 'PRZ ?菟?嚗?敺?璅?舫脣'
                         else:
                             dist = min(abs(live_price - best_p.prz_low), abs(live_price - best_p.prz_high))
                             radar_item['score'] = max(10, int(100 - (dist / live_price) * 1000))
-                            direction = "做多" if best_p.direction == 'bullish' else "做空"
-                            radar_item['trigger_reason'] = f"等待 D 點{direction}至 {best_p.prz_center:.4g}"
+                            direction = "??" if best_p.direction == 'bullish' else "?征"
+                            radar_item['trigger_reason'] = f'PRZ breakout {direction} near {best_p.prz_center:.4g}'
                             
                     current_radar.append(radar_item)
                     if len(current_radar) == 1 or len(current_radar) % 5 == 0:
@@ -595,22 +595,22 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         if strategy_name == 'SqueezeHunter':
                             squeeze_ready = squeeze_hunter_release_ready(signal_df, sample=int(mode_perf.get('sample') or 0))
                         if not sl_valid or not tp_valid:
-                            block_reason = "API 參數無效 (止盈止損反向)"
+                            block_reason = "invalid TP/SL settings"
                         elif not trend_ok:
-                            t_dir = '空' if htf_bear and not htf_bull else ('多' if htf_bull and not htf_bear else '平')
-                            block_reason = f"大趨勢逆風 ({trend_tf} {t_dir})"
+                            t_dir = 'bear' if htf_bear and not htf_bull else ('bull' if htf_bull and not htf_bear else 'flat')
+                            block_reason = f"trend mismatch ({trend_tf} {t_dir})"
                         # Keep entries anchored to the PRZ; SqueezeHunter also needs a confirmed release.
                         is_prz_ok = in_prz
                         if not is_prz_ok:
-                            block_reason = "尚未進入 PRZ 區間"
+                            block_reason = "entry not in PRZ"
                         else:
                             # PROFITABILITY CHECK (Live Fire Calibration)
                             active_min_profit = max(active_min_profit, config.PROFIT_FIRST_MIN_ROOM_FLOOR)
                             profit_pct = abs(plan["tp1"] - current_price) / current_price
                             if profit_pct < active_min_profit:
-                                block_reason = f"利潤空間太小 (<{(active_min_profit*100):.2f}%)"
+                                block_reason = f"?拇膜蝛粹?憭芸? (<{(active_min_profit*100):.2f}%)"
                             elif true_rr < tuned_target_rr:
-                                block_reason = f"真實盈虧比過低 ({round(true_rr, 2)} < {round(tuned_target_rr, 2)})"
+                                block_reason = f"?祕?瘥?雿?({round(true_rr, 2)} < {round(tuned_target_rr, 2)})"
                                 
                         # Growth engine override
                         div_ok = check_divergence(signal_df, len(signal_df)-1, lookback=30, direction=p.direction)
@@ -741,7 +741,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                 block_reason = "cooldown active"
                                 signal_obj["block_reason"] = block_reason
                         
-                        # 檢查該幣種是否有反向持倉
+                        # 瑼Ｘ閰脣馳蝔格?行?????
                         has_opposite_position = False
                         try:
                             with open(config.TRADE_FILE, 'r', encoding='utf-8') as af:
@@ -996,7 +996,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                 )
                                 
                                 signal_obj["status"] = "active"
-                                signal_obj["entry_reason"] = f"觸發 {p.pattern_name} (指標共振/趨勢吻合)"
+                                signal_obj["entry_reason"] = f"閫貊 {p.pattern_name} (???望/頞典?餃?)"
                                 signal_obj["entry_reason"] = (
                                     f"{mode_reason}; {execution['execution']} fill {fill_price}; "
                                     f"{plan.get('exit_model')}; margin {margin_usdt}U at {actual_leverage}x"
@@ -1048,8 +1048,8 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
 
             # Update ML evolution logs dynamically for frontend visibility
             time_str = datetime.datetime.now().strftime('%H:%M:%S')
-            log_msg = f"[{time_str}] [{strategy_name}] AI 學習控制台：已掃描全市場 {len(symbols)} 個標的，當前狀態為 {state.market_radar_dict[strategy_name][0].get('trigger_reason', '探測中') if state.market_radar_dict[strategy_name] else '無可用信號'}"
-            if not any(strategy_name in item and "AI 學習控制台" in item for item in state.ml_evolution_logs[-8:]):
+            log_msg = f'[{time_str}] [{strategy_name}] radar updated with {len(symbols)} symbols'
+            if not any(strategy_name in item and 'radar updated' in item for item in state.ml_evolution_logs[-8:]):
                 state.ml_evolution_logs.append(log_msg)
                 if len(state.ml_evolution_logs) > 60:
                     state.ml_evolution_logs = state.ml_evolution_logs[-60:]
@@ -1216,6 +1216,7 @@ def background_sync_loop():
 
                 # 3. Sync Algo Orders (TP/SL)
                 all_algos = []
+                all_algos = []
                 if not config.MOCK_MODE:
                     try:
                         oco_res = okx.private_get_trade_orders_algo_pending({'instType':'SWAP', 'ordType': 'oco'})
@@ -1224,29 +1225,24 @@ def background_sync_loop():
                         if cond_res and cond_res.get('code') == '0': all_algos.extend(cond_res.get('data', []))
                     except Exception as algo_err:
                         print(f"[BACKGROUND SYNC ERROR] Failed to fetch algo orders: {algo_err}")
-                        # 如果發生權限/白名單問題，自動退回到 MOCK_MODE
-                        if "PermissionDenied" in str(algo_err) or "50116" in str(algo_err) or "API Key" in str(algo_err):
-                            config.MOCK_MODE = True
-                            print("[BACKGROUND SYNC] 偵測到 OKX 拒絕訪問，自動切換至 MOCK 本地模擬模式。")
-
                 for t in state.active_trades:
                     if t['status'] == 'active':
                         raw_strat = t.get('strategy', 'SqueezeHunter')
                         
                         if config.MOCK_MODE:
-                            # 🟢 Mock Mode: 模擬保護狀態，直接略過所有實盤 API 同步與交易所時間止盈止損
+                            # ? Mock Mode: 璅⊥靽風????湔?仿???祕??API ?郊?漱????甇Ｙ?甇Ｘ?
                             t['missing_protection_checks'] = 0
                             t['protection_status'] = 'confirmed'
                             t['protection_error'] = None
                             continue
                         
-                        # ⏱️ MeanReversion 40 分鐘時間止損強平
+                        # ?梧? MeanReversion 40 ????甇Ｘ?撘瑕像
                         if raw_strat == 'MeanReversion':
                             opened_ms = t.get('uTime') or t.get('timestamp')
                             if opened_ms:
                                 opened_sec = float(opened_ms) / 1000.0
                                 if time.time() - opened_sec > 40 * 60:
-                                    print(f"[⏱️ MR TIME LIMIT] {t['symbol']} 均值回歸持倉超過 40 分鐘，強制市價平倉退出。")
+                                    print("[MR TIME LIMIT] " + str(t.get('symbol')) + " reached the 40 minute limit")
                                     try:
                                         ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
                                         close_size = as_float(t.get('filled_contracts'))
@@ -1255,15 +1251,15 @@ def background_sync_loop():
                                             close_orphan_trade_record(t, 'time_based_timeout')
                                             continue
                                     except Exception as err:
-                                        print(f"[⏱️ MR TIME LIMIT ERROR] 平倉失敗: {err}")
+                                        print(f"[?梧? MR TIME LIMIT ERROR] 撟喳仃?? {err}")
 
-                        # 🎯 SqueezeHunter 1.0R 多段止盈 50%
+                        # ? SqueezeHunter 1.0R 憭挾甇Ｙ? 50%
                         if raw_strat == 'SqueezeHunter' and not t.get('half_tp_done') and as_float(t.get('entry')) > 0 and as_float(t.get('sl')) > 0:
                             risk_dist = abs(as_float(t.get('entry')) - as_float(t.get('sl')))
                             favorable_move = (as_float(t.get('current')) - as_float(t.get('entry'))) if t['direction'] == 'long' else (as_float(t.get('entry')) - as_float(t.get('current')))
                             r_now = favorable_move / risk_dist if risk_dist > 0 else 0
                             if r_now >= 1.0:
-                                print(f"[🎯 SH MULTI-TP] {t['symbol']} 收益達 1.0R，強制市價平倉 50% 鎖定利潤。")
+                                print("[SH MULTI-TP] " + str(t.get('symbol')) + " hit 1.0R, closing 50%")
                                 try:
                                     ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
                                     close_size = round(as_float(t.get('filled_contracts')) / 2.0, 4)
@@ -1272,7 +1268,7 @@ def background_sync_loop():
                                         if ok:
                                             t['filled_contracts'] = as_float(t.get('filled_contracts')) - close_size
                                             t['half_tp_done'] = True
-                                            print(f"[🎯 SH MULTI-TP SUCCESS] {t['symbol']} 平倉半數完成。剩餘合約: {t['filled_contracts']}")
+                                            print(f"[? SH MULTI-TP SUCCESS] {t['symbol']} 撟喳??詨??擗?蝝? {t['filled_contracts']}")
                                             if t.get('protection_order_id'):
                                                 try:
                                                     okx.cancel_order(t.get('protection_order_id'), ccxt_sym)
@@ -1288,7 +1284,7 @@ def background_sync_loop():
                                             close_orphan_trade_record(t, 'half_tp_already_closed')
                                             continue
                                 except Exception as err:
-                                    print(f"[🎯 SH MULTI-TP ERROR] 執行多段止盈失敗: {err}")
+                                    print(f"[? SH MULTI-TP ERROR] ?瑁?憭挾甇Ｙ?憭望?: {err}")
 
                         expected_inst_id = t.get('instId') or (normalize_symbol_key(t['symbol']).replace('USDT', '') + "-USDT-SWAP")
                         expected_side = 'sell' if t['direction'] == 'long' else 'buy'
@@ -1298,15 +1294,15 @@ def background_sync_loop():
                         candidate_algos = [
                             a for a in all_algos
                             if a.get('instId') == expected_inst_id and a.get('side') == expected_side
-                            and (
-                                not tracked_algo_ids
-                                or str(a.get('algoId') or '') in tracked_algo_ids
-                                or str((a.get('linkedAlgoOrd') or {}).get('algoId') or '') in tracked_algo_ids
-                            )
                         ]
                         protective_algos = protective_algo_targets(
                             all_algos, expected_inst_id, expected_side, tracked_algo_ids
                         )
+                        # Fallback: if tracked_algo_ids yielded nothing but active OCOs exist on exchange, match them
+                        if not protective_algos:
+                            protective_algos = protective_algo_targets(
+                                all_algos, expected_inst_id, expected_side, None
+                            )
                         for a in protective_algos:
                             if as_float(a.get('slTriggerPx')) > 0: t['sl'] = float(a['slTriggerPx'])
                         for a in protective_algos + candidate_algos:
@@ -1322,7 +1318,12 @@ def background_sync_loop():
                             t['missing_protection_checks'] = 0
                             t['protection_status'] = 'confirmed'
                             t['protection_error'] = None
-                        elif t.get('strategy_version') == config.STRATEGY_VERSION and t.get('strategy') != 'Manual':
+                        elif t.get('strategy') == 'Manual':
+                            # Manual positions do not trigger emergency close wind downs; just show status as confirmed or unconfirmed based on OCO presence
+                            t['missing_protection_checks'] = 0
+                            t['protection_status'] = 'confirmed' if protective_algos else None
+                            t['protection_error'] = None
+                        elif t.get('strategy_version') == config.STRATEGY_VERSION:
                             missing_checks = int(t.get('missing_protection_checks') or 0) + 1
                             t['missing_protection_checks'] = missing_checks
                             if missing_checks >= config.PROTECTION_MISSING_CONFIRMATIONS:
@@ -1361,7 +1362,7 @@ def background_sync_loop():
                                             print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
                                             close_orphan_trade_record(t, 'emergency_position_not_found')
                                         elif okx_position_not_found_error(ec, em):
-                                            # Position already closed on OKX side — remove from active trades
+                                            # Position already closed on OKX side ??remove from active trades
                                             print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
                                             t['status'] = 'closed'
                                             t['exit_reason'] = 'emergency_position_not_found'
@@ -1392,7 +1393,7 @@ def background_sync_loop():
                         if stop_is_locked:
                             t['protection_status'] = 'confirmed'
                         
-                        # 🏃 DYNAMIC TRAILING STOP MECHANISM (動態追蹤止盈)
+                        # ?? DYNAMIC TRAILING STOP MECHANISM (??餈質馱甇Ｙ?)
                         if t.get('tp1') and t.get('sl') and t.get('entry'):
                             raw_strat = t.get('strategy', 'SqueezeHunter')
                             strat_lookup = 'SqueezeHunter' if raw_strat not in ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter'] else raw_strat
@@ -1501,12 +1502,12 @@ def background_sync_loop():
                                     
                                     if is_better_sl and sl_diff_pct > 0.0005:
                                         if config.MOCK_MODE:
-                                            # 🟢 Mock Mode: 本地直接更新模擬的止損價，不修改交易所
+                                            # ? Mock Mode: ?砍?湔?湔璅⊥?迫?嚗?靽格鈭斗??
                                             t['sl'] = round(new_sl, 6)
                                             t['trailing_stage'] = desired_stage
                                             t['protection_status'] = 'confirmed'
                                             t['protection_error'] = None
-                                            print(f"[🛡️ MOCK TRAILING STOP] {t['symbol']} Mock SL moved locally to: {t['sl']} (Progress: {highest_progress*100:.1f}%)")
+                                            print(f"[?儭?MOCK TRAILING STOP] {t['symbol']} Mock SL moved locally to: {t['sl']} (Progress: {highest_progress*100:.1f}%)")
                                             continue
                                         
                                         retry_after = as_float(t.get('protection_retry_after'))
@@ -1514,8 +1515,16 @@ def background_sync_loop():
                                             continue
                                         for a in protective_algos:
                                             try:
-                                                ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
-                                                formatted_sl = okx.price_to_precision(ccxt_sym, new_sl)
+                                                base_sym = normalize_symbol_key(t['symbol']).replace('USDT', '')
+                                                # Handle special single letter symbols like H, HUSDT -> H/USDT:USDT
+                                                ccxt_sym = f"{base_sym}/USDT:USDT"
+                                                
+                                                # Fallback check: if token markets aren't loaded or coin is not found by CCXT unified symbol, try fetching it via instId
+                                                try:
+                                                    formatted_sl = okx.price_to_precision(ccxt_sym, new_sl)
+                                                except Exception:
+                                                    ccxt_sym = f"{t.get('instId') or (base_sym + '-USDT-SWAP')}"
+                                                    formatted_sl = okx.price_to_precision(ccxt_sym, new_sl)
                                                 
                                                 # Avoid redundant API calls if string format matches existing OKX order
                                                 if formatted_sl == str(a.get('slTriggerPx')):
@@ -1530,7 +1539,10 @@ def background_sync_loop():
                                                         far_tp = t['entry'] + (total_dist * 3.0)
                                                     else:
                                                         far_tp = max(0.0001, t['entry'] - (total_dist * 3.0))
-                                                    formatted_far_tp = okx.price_to_precision(ccxt_sym, far_tp)
+                                                    try:
+                                                        formatted_far_tp = okx.price_to_precision(ccxt_sym, far_tp)
+                                                    except Exception:
+                                                        formatted_far_tp = str(round(far_tp, 4))
                                                     if a.get('tp_limit_linked'):
                                                         t['tp_extension_status'] = 'kept_limit_tp_for_linked_oco_safety'
                                                     else:
@@ -1547,7 +1559,7 @@ def background_sync_loop():
                                                     failed = False
                                                 
                                                 if not failed:
-                                                    print(f"[🛡️ TRAILING STOP] {t['symbol']} SL moved to: {formatted_sl} (Progress: {highest_progress*100:.1f}%)")
+                                                    print(f"[?儭?TRAILING STOP] {t['symbol']} SL moved to: {formatted_sl} (Progress: {highest_progress*100:.1f}%)")
                                                     t['sl'] = float(formatted_sl)
                                                     t['trailing_stage'] = desired_stage
                                                     t['protection_status'] = 'confirmed'
@@ -1556,7 +1568,7 @@ def background_sync_loop():
                                                     t['protection_retry_after'] = 0
                                                     if tp_update:
                                                         t['tp_removed'] = True
-                                                        print(f"[🚀 INFINITE RUN] {t['symbol']} TP ceiling extended after confirmed amend.")
+                                                        print(f"[?? INFINITE RUN] {t['symbol']} TP ceiling extended after confirmed amend.")
                                                     break
                                                 else:
                                                     failures = int(t.get('protection_retry_count') or 0) + 1
