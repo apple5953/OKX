@@ -997,7 +997,7 @@ function updateOverview() {
     const activePnl = currentTrades
         .filter((trade) => trade.status === 'active')
         .reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
-    const equity = Number(accountData.usdtEq || accountData.usdtAvail || 0);
+    const equity = Number(accountData.usdtEq || 0);
     const pnlEl = document.getElementById('total-profit');
     if (pnlEl) {
         pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
@@ -1006,7 +1006,7 @@ function updateOverview() {
     const totalEquityEl = document.getElementById('total-equity');
     const availEl = document.getElementById('usdt-avail');
     if (totalEquityEl) totalEquityEl.textContent = money(equity);
-    if (availEl) availEl.textContent = money(accountData.usdtAvail);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail || 0);
 
     const strategyTotalPnl = Object.values(performanceData || {}).reduce((sum, p) => sum + Number(p.total_pnl || 0), 0);
     const capitalChange = strategyTotalPnl;
