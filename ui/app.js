@@ -451,6 +451,19 @@ function rowStrategyName(row) {
     return row?.strategy || row?.strategy_name || row?.engine || 'Manual';
 }
 
+function normalizedEngineBucket(item) {
+    let name = rowStrategyName(item);
+    if (['Unknown', 'Recovered', 'Manual', 'Bot', 'Mixed', 'Machine'].includes(name)) {
+        const sym = String(item?.symbol || '').toUpperCase();
+        if (sym.includes('SOL')) name = 'MacroSniper';
+        else if (sym.includes('SUI')) name = 'SqueezeHunter';
+        else if (sym.includes('BTC')) name = 'MeanReversion';
+        else if (sym.includes('ETH')) name = 'Contrarian';
+        else name = 'MeanReversion';
+    }
+    return name;
+}
+
 function isSessionRow(row) {
     const startedAt = sessionStartedAtMs();
     if (!startedAt) return true;
@@ -932,8 +945,8 @@ function renderModeCards() {
         const stats = strategyStats[name] || sessionStrategyStats[name] || {};
         const perf = performanceData[name] || sessionPerformanceData[name] || {};
         const opt = optimizerData[name] || sessionOptimizerData[name] || {};
-        const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && rowStrategyName(trade) === name);
-        const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && rowStrategyName(trade) === name);
+        const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && normalizedEngineBucket(trade) === name);
+        const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && normalizedEngineBucket(trade) === name);
         const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
         const pnl = Number(stats.pnl || perf.total_pnl || 0);
         const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
@@ -1433,15 +1446,7 @@ function renderEngineHeartbeat() {
     const engineActive = {};
     const enginePnl = {};
     currentTrades.filter(t => t.status === 'active').forEach(t => {
-        let s = t.strategy || t.strategy_name || t.engine || 'Unknown';
-        if (s === 'Unknown' || s === 'Recovered' || s === 'Manual') {
-            const sym = String(t.symbol || '').toUpperCase();
-            if (sym.includes('SOL')) s = 'MacroSniper';
-            else if (sym.includes('SUI')) s = 'SqueezeHunter';
-            else if (sym.includes('BTC')) s = 'MeanReversion';
-            else if (sym.includes('ETH')) s = 'Contrarian';
-            else s = 'MeanReversion';
-        }
+        const s = normalizedEngineBucket(t);
         engineActive[s] = (engineActive[s] || 0) + 1;
         enginePnl[s] = (enginePnl[s] || 0) + Number(t.pnl || 0);
     });
@@ -1449,7 +1454,7 @@ function renderEngineHeartbeat() {
     // Count signals (potential) per engine
     const engineSignals = {};
     currentTrades.filter(t => t.status === 'potential').forEach(t => {
-        const s = t.strategy || 'Unknown';
+        const s = normalizedEngineBucket(t);
         engineSignals[s] = (engineSignals[s] || 0) + 1;
     });
 
@@ -1489,16 +1494,7 @@ function renderEngineHeartbeat() {
         // Active trade stage summary
         const activeTrades = currentTrades.filter(t => {
             if (t.status !== 'active') return false;
-            let s = t.strategy || t.strategy_name || t.engine || 'Unknown';
-            if (s === 'Unknown' || s === 'Recovered' || s === 'Manual') {
-                const sym = String(t.symbol || '').toUpperCase();
-                if (sym.includes('SOL')) s = 'MacroSniper';
-                else if (sym.includes('SUI')) s = 'SqueezeHunter';
-                else if (sym.includes('BTC')) s = 'MeanReversion';
-                else if (sym.includes('ETH')) s = 'Contrarian';
-                else s = 'MeanReversion';
-            }
-            return s === name;
+            return normalizedEngineBucket(t) === name;
         });
         const stagesHtml = activeTrades.map(t => {
             const stage = t.trailing_stage;
