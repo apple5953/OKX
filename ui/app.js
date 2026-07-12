@@ -932,6 +932,9 @@ function renderModeCards() {
         const stats = strategyStats[name] || sessionStrategyStats[name] || {};
         const perf = performanceData[name] || sessionPerformanceData[name] || {};
         const opt = optimizerData[name] || sessionOptimizerData[name] || {};
+        const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && rowStrategyName(trade) === name);
+        const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && rowStrategyName(trade) === name);
+        const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
         const pnl = Number(stats.pnl || perf.total_pnl || 0);
         const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
         const verdict = perf.verdict || stats.verdict || 'learning';
@@ -946,13 +949,15 @@ function renderModeCards() {
             </div>
             <p>${tierLabel}</p>
             <div class="mode-stats">
-                <div><span>\u7e3d\u640d\u76ca</span><strong class="${pnl >= 0 ? 'gain' : 'loss'}">${money(pnl)}</strong></div>
-                <div><span>\u52dd\u7387</span><strong>${winRate}</strong></div>
-                <div><span>PF</span><strong class="${Number(perf.profit_factor || 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
-                <div><span>\u671f\u671b</span><strong class="${Number(perf.expectancy || 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>即時持倉</span><strong class="${liveTrades.length > 0 ? 'gain' : ''}">${liveTrades.length}</strong></div>
+                <div><span>候選</span><strong>${candidateTrades.length}</strong></div>
+                <div><span>即時浮動</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}</strong></div>
+                <div><span>訓練勝率</span><strong>${winRate}</strong></div>
+                <div><span>訓練期望</span><strong class="${Number(perf.expectancy || 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>訓練PF</span><strong class="${Number(perf.profit_factor || 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
             </div>
             <p class="mode-note">${escapeHtml(reasonText)}</p>
-            <p class="mode-note optimizer-note">${optimizerLine(opt)}</p>
+            <p class="mode-note optimizer-note">訓練調參：${optimizerLine(opt)}</p>
             <div class="rule-line">60U x \u4fe1\u5fc3 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr}x ATR / TP ${profile.tp_atr}x ATR</div>
         `;
         container.appendChild(card);
