@@ -408,10 +408,11 @@ function verdictDetail(perf) {
 }
 
 function filtered(source) {
-    if (currentStrategyFilter === 'All') return source;
-    return source.filter((item) => {
-        const strat = item.strategy || item.strategy_name || '';
-        return strat === currentStrategyFilter;
+    const rows = Array.isArray(source) ? source : [];
+    if (currentStrategyFilter === 'All') return rows;
+    return rows.filter((item) => {
+        const strat = rowStrategyName(item);
+        return strat === currentStrategyFilter || normalizedEngineBucket(item) === currentStrategyFilter;
     });
 }
 
@@ -476,11 +477,11 @@ function sessionHistoryRows() {
 }
 
 function sessionActiveTrades() {
-    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade.status === 'active' && isSessionTrade(trade));
+    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade.status === 'active' && isSessionRow(trade));
 }
 
 function sessionPotentialTrades() {
-    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade.status === 'potential' && isSessionTrade(trade));
+    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade.status === 'potential' && isSessionRow(trade));
 }
 
 function normalizeSessionPnl(row) {
@@ -680,7 +681,7 @@ function refreshSessionMetrics() {
     return { sessionRows };
 }
 
-function updateProgressCurve(pnlVal, signedProgress) {
+function deprecatedUpdateProgressCurve(pnlVal, signedProgress) {
     const maxTargetProgress = Math.max(100, signedProgress);
     const progressRatio = Math.max(0, signedProgress) / maxTargetProgress;
     const isDrawdown = signedProgress < 0;
@@ -771,6 +772,23 @@ function renderHealthList(items, emptyLabel) {
     }).join('');
 }
 
+function buildHealthCheckModel() {
+    const data = healthCheckData || {};
+    const counts = data.counts || {};
+    const liveCounts = {
+        activeTrades: Number(counts.active_trades || 0),
+        badTrades: Number(counts.bad_trades || 0),
+        protectionWarnings: Number(counts.protection_warnings || 0),
+        trainingIssues: Number(counts.training_issues || 0),
+    };
+    const sessionCounts = {
+        activeTrades: Number(counts.session_active_trades ?? sessionActiveTrades().length),
+        potentialTrades: Number(counts.session_potential_trades ?? sessionPotentialTrades().length),
+        trainingIssues: Number(counts.session_training_issues ?? 0),
+    };
+    return { data, counts, liveCounts, sessionCounts };
+}
+
 function renderHealthCheck() {
     const summary = document.getElementById('health-summary');
     const blocks = document.getElementById('health-blocks');
@@ -778,8 +796,11 @@ function renderHealthCheck() {
     const stateEl = document.getElementById('health-check-state');
     if (!summary || !blocks || !detail || !stateEl) return;
 
-    const data = healthCheckData || {};
-    const counts = data.counts || {};
+    const model = buildHealthCheckModel();
+    const data = model.data;
+    const counts = model.counts;
+    const liveCounts = model.liveCounts;
+    const sessionCounts = model.sessionCounts;
     const status = String(data.status || 'warning').toLowerCase();
     const score = Number(data.score);
     const runtime = data.runtime || {};
@@ -810,6 +831,22 @@ function renderHealthCheck() {
             <small>${counts.quarantined_rows ?? 0} 筆隔離 / ${counts.version_mismatch_rows ?? 0} 筆版本不符</small>
         </div>
     `;
+
+    const summaryCards = summary.querySelectorAll('.health-card');
+    if (summaryCards[2]) {
+        summaryCards[2].innerHTML = `
+            <span>實盤執行</span>
+            <strong class="${liveCounts.badTrades > 0 ? 'loss' : 'gain'}">${liveCounts.badTrades}</strong>
+            <small>${liveCounts.activeTrades} 個持倉 / ${counts.protection_warnings ?? 0} 個警告</small>
+        `;
+    }
+    if (summaryCards[3]) {
+        summaryCards[3].innerHTML = `
+            <span>訓練 / Session</span>
+            <strong class="${sessionCounts.trainingIssues > 0 ? 'loss' : 'gain'}">${sessionCounts.trainingIssues}</strong>
+            <small>${sessionCounts.activeTrades} 個實際 / ${sessionCounts.potentialTrades} 個候選</small>
+        `;
+    }
 
     blocks.innerHTML = `
         <div class="health-block">
@@ -857,6 +894,23 @@ function renderHealthCheck() {
             <span class="hint">${escapeHtml(zhText(data.health_summary?.message || '沒有其他備註'))}</span>
         </div>
     `;
+    const detailCards = detail.querySelectorAll('.health-detail-card');
+    if (detailCards[0]) {
+        detailCards[0].querySelector('.health-tags').innerHTML = `
+            <span class="health-tag ${healthStatusClass(status)}">${healthStatusLabel(status)}</span>
+            <span class="health-tag">已驗證 ${counts.verified_rows ?? 0}</span>
+            <span class="health-tag ${sessionCounts.trainingIssues > 0 ? 'warning' : 'good'}">Session 異常 ${sessionCounts.trainingIssues}</span>
+        `;
+    }
+    if (detailCards[1]) {
+        detailCards[1].querySelector('.health-tags').innerHTML = `
+            <span class="health-tag ${runtime.run_mode === 'live' ? 'critical' : (runtime.run_mode === 'demo' ? 'warning' : 'good')}">${escapeHtml(runtime.run_mode === 'live' ? '撖衣' : runtime.run_mode === 'demo' ? '璅⊥' : '?芸?')}</span>
+            <span class="health-tag">節點 ${escapeHtml(runtime.node_name || '-')}</span>
+            <span class="health-tag">實盤 ${liveCounts.activeTrades}</span>
+            <span class="health-tag">Session ${sessionCounts.activeTrades}/${sessionCounts.potentialTrades}</span>
+            <span class="health-tag ${zeroStart.zero_start_mode ? 'good' : 'warning'}">零起點 ${zeroStart.zero_start_mode ? '啟用' : '關閉'}</span>
+        `;
+    }
 }
 
 async function fetchHealthCheck() {
@@ -935,24 +989,56 @@ function renderBotReport() {
     `;
 }
 
+function buildStrategyCardModel(name) {
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
+    const reportMode = reportModes.get(name) || {};
+    const stats = strategyStats[name] || sessionStrategyStats[name] || {};
+    const perf = performanceData[name] || sessionPerformanceData[name] || {};
+    const opt = optimizerData[name] || sessionOptimizerData[name] || {};
+    const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && normalizedEngineBucket(trade) === name);
+    const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && normalizedEngineBucket(trade) === name);
+    const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
+    const cumulativePnl = Number(stats.pnl || perf.total_pnl || 0);
+    const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
+    const verdict = perf.verdict || stats.verdict || 'learning';
+    const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
+    const reasonText = reportMode.reason || verdictDetail(perf);
+    return {
+        reportMode,
+        stats,
+        perf,
+        opt,
+        liveTrades,
+        candidateTrades,
+        livePnl,
+        cumulativePnl,
+        winRate,
+        verdict,
+        tierLabel,
+        reasonText,
+    };
+}
+
 function renderModeCards() {
     const container = document.getElementById('mode-cards');
     container.innerHTML = '';
     const { liveModes, weakModes } = getUnifiedReportModes();
     const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
     Object.entries(profiles).forEach(([name, profile]) => {
+        const model = buildStrategyCardModel(name);
         const reportMode = reportModes.get(name) || {};
-        const stats = strategyStats[name] || sessionStrategyStats[name] || {};
-        const perf = performanceData[name] || sessionPerformanceData[name] || {};
-        const opt = optimizerData[name] || sessionOptimizerData[name] || {};
-        const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && normalizedEngineBucket(trade) === name);
-        const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && normalizedEngineBucket(trade) === name);
-        const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
-        const pnl = Number(stats.pnl || perf.total_pnl || 0);
-        const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
-        const verdict = perf.verdict || stats.verdict || 'learning';
-        const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
-        const reasonText = reportMode.reason || verdictDetail(perf);
+        const stats = model.stats;
+        const perf = model.perf;
+        const opt = model.opt;
+        const liveTrades = model.liveTrades;
+        const candidateTrades = model.candidateTrades;
+        const livePnl = model.livePnl;
+        const pnl = model.cumulativePnl;
+        const winRate = model.winRate;
+        const verdict = model.verdict;
+        const tierLabel = model.tierLabel;
+        const reasonText = model.reasonText;
         const card = document.createElement('article');
         card.className = 'mode-card';
         card.innerHTML = `
@@ -971,6 +1057,7 @@ function renderModeCards() {
             </div>
             <p class="mode-note">${escapeHtml(reasonText)}</p>
             <p class="mode-note optimizer-note">訓練調參：${optimizerLine(opt)}</p>
+            <p class="mode-note cumulative-note">訓練累積盈虧 ${escapeHtml(signed(pnl, 1))}U</p>
             <div class="rule-line">60U x \u4fe1\u5fc3 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr}x ATR / TP ${profile.tp_atr}x ATR</div>
         `;
         container.appendChild(card);
@@ -985,18 +1072,20 @@ function verdictBadge(verdict) {
 function renderPerformance() {
     const tbody = document.getElementById('performance-body');
     tbody.innerHTML = '';
-    Object.entries(performanceData || {}).forEach(([name, perf]) => {
+    Object.keys(profiles || {}).forEach((name) => {
         if (currentStrategyFilter !== 'All' && name !== currentStrategyFilter) return;
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf;
+        const opt = model.opt;
         const pf = Number(perf.profit_factor || 0);
         const exp = Number(perf.expectancy || 0);
-        const opt = optimizerData[name] || {};
         const stateLabel = optimizerLabel(opt);
         const tunedAtr = perf.tuned_sl_atr ? `ATR 止損系數: ${perf.tuned_sl_atr}` : '';
         const confidenceText = perf.confidence ? `AI 信心權重: ${perf.confidence}x` : '';
         const row = document.createElement('tr');
         row.innerHTML = `
             <td><strong>${strategyLabel(name)}</strong><small>AI 權重: ${perf.weight ?? '1.0'}x / 健康度 ${perf.health_score ?? '-'}</small></td>
-            <td>${perf.sample || 0} / ${perf.win_rate == null ? '-' : pct(perf.win_rate * 100, 1)}</td>
+            <td>${perf.sample || 0} / ${perf.win_rate == null ? '-' : pct(perf.win_rate, 1)}</td>
             <td class="${pf >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</td>
             <td><span class="gain">${money(perf.avg_win)}</span> / <span class="loss">${money(perf.avg_loss)}</span></td>
             <td class="${exp >= 0 ? 'gain' : 'loss'}">${money(exp)}</td>
@@ -1014,7 +1103,7 @@ function renderPerformance() {
     });
 }
 
-function renderTrades() {
+function deprecatedRenderTrades() {
     const tbody = document.getElementById('trades-body');
     tbody.innerHTML = '';
     const filter = document.querySelector('.tab.active')?.dataset.filter || 'all';
@@ -1118,8 +1207,9 @@ function renderStrategyInfo() {
         return;
     }
     const profile = profiles[currentStrategyFilter] || {};
-    const perf = performanceData[currentStrategyFilter] || {};
-    const opt = optimizerData[currentStrategyFilter] || {};
+    const model = buildStrategyCardModel(currentStrategyFilter);
+    const perf = model.perf;
+    const opt = model.opt;
     box.hidden = false;
     box.innerHTML = `
         <strong>${strategyLabel(currentStrategyFilter)}</strong>
@@ -1462,15 +1552,16 @@ function renderEngineHeartbeat() {
     const engines = ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter'];
     container.innerHTML = engines.map(name => {
         const meta = ENGINE_META[name] || { icon: '•', desc: name, color: '#888' };
-        const stats = strategyStats[name] || sessionStrategyStats[name] || {};
-        const perf = performanceData[name] || {};
-        const opt = optimizerData[name] || {};
-        const active = engineActive[name] || 0;
-        const signals = engineSignals[name] || 0;
-        const pnl = enginePnl[name] || 0;
-        const wr = perf.win_rate != null ? perf.win_rate + '%' : '--';
+        const model = buildStrategyCardModel(name);
+        const stats = model.stats;
+        const perf = model.perf;
+        const opt = model.opt;
+        const active = model.liveTrades.length;
+        const signals = model.candidateTrades.length;
+        const pnl = model.livePnl;
+        const wr = model.winRate;
         const conf = opt.capital_mult != null ? opt.capital_mult.toFixed(2) : (stats.confidence != null ? stats.confidence.toFixed(2) : '1.00');
-        const verdict = verdictLabel(perf.verdict || 'learning');
+        const verdict = verdictLabel(model.verdict);
         const verdictColor = perf.state === 'exploit' ? '#22c55e' : perf.state === 'steady' ? '#60a5fa' : perf.state === 'pause' ? '#ef4444' : '#f59e0b';
 
         // Get detailed block reason from radarDict for this strategy
@@ -1492,10 +1583,7 @@ function renderEngineHeartbeat() {
         }
 
         // Active trade stage summary
-        const activeTrades = currentTrades.filter(t => {
-            if (t.status !== 'active') return false;
-            return normalizedEngineBucket(t) === name;
-        });
+        const activeTrades = model.liveTrades;
         const stagesHtml = activeTrades.map(t => {
             const stage = t.trailing_stage;
             const stageTxt = stage === 'trailing' ? '奔跑' : stage === 'break_even' ? '保本' : '待觸發';

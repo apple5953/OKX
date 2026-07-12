@@ -1141,7 +1141,7 @@ def calculate_keltner(df, period=20, multiplier=1.5):
     return k_upper, k_lower
 
 
-def build_bot_report(visible_trades=None, live_positions=None):
+def deprecated_build_bot_report(visible_trades=None, live_positions=None):
     from .engine import build_live_trade_snapshot
     from .utils import is_session_trade, timestamp_ms, session_started_at_ms
     from .okx_client import capital_snapshot

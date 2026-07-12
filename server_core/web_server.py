@@ -4,7 +4,7 @@ from flask import Flask, jsonify, send_from_directory
 from . import state
 from . import config
 from . import utils
-from .utils import as_float, timestamp_ms, json_safe, has_valid_protection
+from .utils import as_float, timestamp_ms, json_safe, has_valid_protection, is_session_trade, session_started_at_ms
 from .okx_client import sync_exchange_history, capital_snapshot, okx, load_local_account_snapshot, fetch_okx_account_snapshot
 from .strategies import all_strategy_performance, recent_strategy_stats, get_btc_market_regime, auto_tune_strategy_params, build_bot_report, version_matches_strategy_scope
 from .engine import build_live_trade_snapshot, fetch_live_okx_positions, collapse_active_records
@@ -163,6 +163,8 @@ def build_health_check_payload(visible_trades=None, live_positions=None, history
         }
 
     active_trades = [t for t in visible_trades if t.get('status') == 'active']
+    session_active_trades = [t for t in active_trades if is_session_trade(t)]
+    session_potential_trades = [t for t in visible_trades if t.get('status') == 'potential' and is_session_trade(t)]
     bad_trades = []
     protection_warnings = []
     for trade in active_trades:
@@ -236,9 +238,17 @@ def build_health_check_payload(visible_trades=None, live_positions=None, history
             })
 
     active_total = len(active_trades)
+    session_active_total = len(session_active_trades)
+    session_potential_total = len(session_potential_trades)
     bad_trade_count = len(bad_trades)
     warning_count = len(protection_warnings)
     training_issue_count = len(abnormal_training_rows)
+    session_training_issue_count = 0
+    session_history_cutoff = session_started_at_ms()
+    for row in abnormal_training_rows:
+        row_time = timestamp_ms(row.get('closed_at') or row.get('timestamp'))
+        if row_time >= session_history_cutoff and row_time > 0:
+            session_training_issue_count += 1
     score = 100
     score -= min(50, bad_trade_count * 25)
     score -= min(20, warning_count * 6)
@@ -260,9 +270,12 @@ def build_health_check_payload(visible_trades=None, live_positions=None, history
         'runtime': build_runtime_status_v2(),
         'counts': {
             'active_trades': active_total,
+            'session_active_trades': session_active_total,
+            'session_potential_trades': session_potential_total,
             'bad_trades': bad_trade_count,
             'protection_warnings': warning_count,
             'training_issues': training_issue_count,
+            'session_training_issues': session_training_issue_count,
             'quarantined_rows': quarantined_count,
             'verified_rows': verified_count,
             'version_mismatch_rows': version_mismatch_count,
