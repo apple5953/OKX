@@ -249,7 +249,7 @@ def execute_bounded_limit_entry(symbol, side, size, strategy_name, client_order_
             raw_error = exc
 
         if order is None:
-            if config.DEMO_MODE or config.MOCK_MODE:
+            if config.MOCK_MODE:
                 order = _simulate_trade_order(symbol, side, size, limit_price, 'bounded_fok_limit')
             else:
                 if raw_error:
@@ -309,7 +309,7 @@ def place_exact_fill_protection(symbol, direction, filled_size, plan, client_ord
             }
         raise RuntimeError(str(response))
     except Exception as exc:
-        if config.DEMO_MODE or config.MOCK_MODE:
+        if config.MOCK_MODE:
             return {
                 'id': f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
                 'clientOrderId': protection_id,
@@ -328,22 +328,28 @@ def place_exact_fill_protection(symbol, direction, filled_size, plan, client_ord
 def emergency_close_unprotected(symbol, direction, filled_size):
     """Close a position in Net Mode. Returns (success, error_code, error_msg)."""
     close_side = 'sell' if direction == 'long' else 'buy'
-    try:
-        result = _place_raw_trade_order(symbol, 'market', close_side, filled_size, None, {
-            'posSide': 'net',
-            'reduceOnly': True,
-        })
-        if not _order_result_success(result):
-            raise RuntimeError(str(result))
-        return True, '0', ''
-    except Exception as e:
-        err_str = str(e)
-        # 51169 = no positions in this direction (already closed)
-        if '51169' in err_str:
-            return False, '51169', 'Position already closed or does not exist'
-        if config.DEMO_MODE or config.MOCK_MODE:
+    payload_variants = [
+        {'reduceOnly': True, 'posSide': 'long' if direction == 'long' else 'short'},
+        {'reduceOnly': True},
+        {'reduceOnly': True, 'posSide': 'net'},
+    ]
+    last_exc = None
+    for extra in payload_variants:
+        try:
+            result = _place_raw_trade_order(symbol, 'market', close_side, filled_size, None, extra)
+            if not _order_result_success(result):
+                raise RuntimeError(str(result))
             return True, '0', ''
-        raise
+        except Exception as e:
+            last_exc = e
+            err_str = str(e)
+            # 51169 = no positions in this direction (already closed)
+            if '51169' in err_str:
+                return False, '51169', 'Position already closed or does not exist'
+            continue
+    if config.MOCK_MODE:
+        return True, '0', ''
+    raise last_exc if last_exc is not None else RuntimeError('Emergency close failed')
 
 def okx_order_failed(result):
     info = dict((result or {}).get('info') or {})

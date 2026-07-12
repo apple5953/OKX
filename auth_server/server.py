@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.json')
-GAS_URL = "https://script.google.com/macros/s/AKfycbwKBA7MgMv_4O5c7sQABtY7BXBukS5A2I73L4f19phmqYzR7aXJMb8tYYI-UiwmQ5lhCw/exec"
+GAS_URL = "https://script.google.com/macros/s/AKfycbwd75y2vsmgA7g0AtNxqiCSLkqT4Ied1n-nV5JpOy__gM3bB8pWqNw6PZiyWpbrNeSjqg/exec"
 
 def load_config():
     if os.path.exists(CONFIG_PATH):

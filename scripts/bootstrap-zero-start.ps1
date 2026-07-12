@@ -83,11 +83,17 @@ if (-not $resolvedRunMode) {
 }
 
 $env:OKX_RUN_MODE = $resolvedRunMode
+$strategyVersion = if ($env:OKX_STRATEGY_VERSION) { $env:OKX_STRATEGY_VERSION } else { 'v13' }
 
 $journalPath = Join-Path $RootDir ("journal_{0}.json" -f $resolvedNodeName)
 $tradePath = Join-Path $RootDir ("active_trades_{0}.json" -f $resolvedNodeName)
 $legacyJournalPath = Join-Path $RootDir 'trade_journal.json'
 $legacyTradePath = Join-Path $RootDir 'active_trades.json'
+$accountDumpPath = Join-Path $RootDir 'api_dump.json'
+$accountOutputPath = Join-Path $RootDir 'api_output.json'
+$optimizerPath = Join-Path $RootDir 'global_optimizer.json'
+$cycleStatePath = Join-Path $RootDir 'optimization_cycle_state.json'
+$zeroStartStatePath = Join-Path $RootDir ("zero_start_state_{0}.json" -f $resolvedNodeName)
 $backupRoot = Join-Path $RootDir 'backups'
 $backupDir = Join-Path $backupRoot ("zero-start-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
@@ -105,9 +111,39 @@ Backup-And-Reset -Path $journalPath
 Backup-And-Reset -Path $tradePath
 Backup-And-Reset -Path $legacyJournalPath
 Backup-And-Reset -Path $legacyTradePath
+Backup-And-Reset -Path $accountDumpPath
+Backup-And-Reset -Path $accountOutputPath
+Backup-And-Reset -Path $optimizerPath
+Backup-And-Reset -Path $cycleStatePath
+Backup-And-Reset -Path $zeroStartStatePath
 
 Set-Content -LiteralPath $journalPath -Value '[]' -Encoding UTF8
 Set-Content -LiteralPath $tradePath -Value '[]' -Encoding UTF8
+Set-Content -LiteralPath $optimizerPath -Value '{}' -Encoding UTF8
+
+$manifestPayload = [ordered]@{
+    node_name = $resolvedNodeName
+    strategy_version = $strategyVersion
+    zero_start_mode = $true
+    bootstrapped_at = (Get-Date).ToUniversalTime().ToString("o")
+    reset_at = (Get-Date).ToUniversalTime().ToString("o")
+    reset_reason = 'manual zero-start bootstrap'
+}
+$manifestPayload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $zeroStartStatePath -Encoding UTF8
+
+$cyclePayload = [ordered]@{
+    generation = $strategyVersion
+    last_evaluated_trade_count = 0
+    completed_cycles = 0
+    consecutive_positive_cycles = 0
+    last_checked_at = $null
+    mode = 'training_active'
+    summary = @{}
+    top_drags = @()
+    strategies = @{}
+    notes = ''
+}
+$cyclePayload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $cycleStatePath -Encoding UTF8
 
 Write-Host "[OK] Zero-start initialized for node: $resolvedNodeName"
 Write-Host "[OK] Run mode: $resolvedRunMode"
@@ -116,5 +152,6 @@ Write-Host "[OK] Active trades: $tradePath"
 Write-Host "[OK] Backups: $backupDir"
 
 if (-not $SkipLaunch) {
+    $env:OKX_ZERO_START_READY = '1'
     & (Join-Path $RootDir 'run_bot.bat') $resolvedRunMode
 }

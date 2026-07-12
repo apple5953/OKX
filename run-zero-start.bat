@@ -1,8 +1,8 @@
 @echo off
 setlocal
+
 set "ROOT_DIR=%~dp0"
-set "NODE_NAME=%~1"
-if "%NODE_NAME%"=="" set "NODE_NAME=%OKX_NODE_NAME%"
-if "%NODE_NAME%"=="" set "NODE_NAME=%NODE_NAME%"
-set "RUN_MODE=%~2"
-powershell -ExecutionPolicy Bypass -File "%ROOT_DIR%scripts\bootstrap-zero-start.ps1" -NodeName "%NODE_NAME%" -RunMode "%RUN_MODE%"
+set "PS1_PATH=%ROOT_DIR%scripts\bootstrap-zero-start.ps1"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_PATH%" %*
+exit /b %ERRORLEVEL%

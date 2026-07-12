@@ -32,11 +32,17 @@ esac
 export OKX_NODE_NAME="$NODE_NAME"
 export NODE_NAME="$NODE_NAME"
 export OKX_RUN_MODE="$RUN_MODE"
+STRATEGY_VERSION="${OKX_STRATEGY_VERSION:-v13}"
 
 journal_path="$ROOT_DIR/journal_${NODE_NAME}.json"
 trade_path="$ROOT_DIR/active_trades_${NODE_NAME}.json"
 legacy_journal="$ROOT_DIR/trade_journal.json"
 legacy_trade="$ROOT_DIR/active_trades.json"
+account_dump="$ROOT_DIR/api_dump.json"
+account_output="$ROOT_DIR/api_output.json"
+optimizer_path="$ROOT_DIR/global_optimizer.json"
+cycle_state_path="$ROOT_DIR/optimization_cycle_state.json"
+zero_start_state="$ROOT_DIR/zero_start_state_${NODE_NAME}.json"
 backup_dir="$ROOT_DIR/backups/zero-start-$(date +%Y%m%d-%H%M%S)"
 
 mkdir -p "$backup_dir"
@@ -52,9 +58,39 @@ backup_and_reset "$journal_path"
 backup_and_reset "$trade_path"
 backup_and_reset "$legacy_journal"
 backup_and_reset "$legacy_trade"
+backup_and_reset "$account_dump"
+backup_and_reset "$account_output"
+backup_and_reset "$optimizer_path"
+backup_and_reset "$cycle_state_path"
+backup_and_reset "$zero_start_state"
 
 printf '[]\n' > "$journal_path"
 printf '[]\n' > "$trade_path"
+printf '{}\n' > "$optimizer_path"
+cat > "$cycle_state_path" <<JSON
+{
+  "generation": "$STRATEGY_VERSION",
+  "last_evaluated_trade_count": 0,
+  "completed_cycles": 0,
+  "consecutive_positive_cycles": 0,
+  "last_checked_at": null,
+  "mode": "training_active",
+  "summary": {},
+  "top_drags": [],
+  "strategies": {},
+  "notes": ""
+}
+JSON
+cat > "$zero_start_state" <<JSON
+{
+  "node_name": "$NODE_NAME",
+  "strategy_version": "$STRATEGY_VERSION",
+  "zero_start_mode": true,
+  "bootstrapped_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reset_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reset_reason": "manual zero-start bootstrap"
+}
+JSON
 
 echo "[OK] Zero-start initialized for node: $NODE_NAME"
 echo "[OK] Run mode: $RUN_MODE"
@@ -63,5 +99,6 @@ echo "[OK] Active trades: $trade_path"
 echo "[OK] Backups: $backup_dir"
 
 if [ "${SKIP_LAUNCH:-0}" != "1" ]; then
+    export OKX_ZERO_START_READY=1
     bash "$ROOT_DIR/run_bot.sh" "$RUN_MODE"
 fi

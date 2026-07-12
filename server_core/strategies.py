@@ -53,20 +53,27 @@ def squeeze_hunter_release_ready(df, sample=0):
 def version_matches_strategy_scope(row_version):
     if not row_version:
         return False
-    # 允許機器人讀取最近 v8 到 v12 的所有歷史平倉單來做交叉學習
-    allowed_versions = {'v8', 'v9', 'v10', 'v11', 'v12', 'execution-safety-v8-20260701'}
     v_clean = str(row_version).strip().lower()
+    current_version = str(config.STRATEGY_VERSION).strip().lower()
+    if current_version and current_version in v_clean:
+        return True
+    if not config.ALLOW_LEGACY_LEARNING:
+        return False
+    # Legacy opt-in: only enable when explicitly requested for migration analysis.
+    allowed_versions = {'v8', 'v9', 'v10', 'v11', 'v12', 'v13', 'execution-safety-v8-20260701'}
     return any(v in v_clean for v in allowed_versions)
 
 def recent_strategy_stats(strategy_name, category=None, limit=40):
-    from .okx_client import sync_exchange_history
+    from .okx_client import sync_exchange_history, infer_history_strategy
     history = sync_exchange_history()
     rows = []
     seen = set()
     for row in reversed(history):
-        if row.get('strategy') != strategy_name:
+        if infer_history_strategy(row, row) != strategy_name:
             continue
         if category and row.get('category') != category:
+            continue
+        if row.get('eligible_for_learning') is not True or row.get('accounting_status') != 'verified':
             continue
         if version_matches_strategy_scope(row.get('strategy_version')):
             key = (row.get('posId'), row.get('close_event_key'))
@@ -76,8 +83,10 @@ def recent_strategy_stats(strategy_name, category=None, limit=40):
     # Fallback to journal
     if len(rows) < 10:
         for row in reversed(state.trade_journal):
-            if row.get('strategy') == strategy_name and row.get('status') == 'closed':
+            if infer_history_strategy(row, row) == strategy_name and row.get('status') == 'closed':
                 if category and row.get('category') != category:
+                    continue
+                if row.get('eligible_for_learning') is not True or row.get('accounting_status') != 'verified':
                     continue
                 if not row.get('strategy_version') or version_matches_strategy_scope(row.get('strategy_version')):
                     key = (row.get('posId'), row.get('close_event_key') or row.get('closed_at'))
@@ -163,10 +172,10 @@ def strategy_performance(strategy_name, limit=120):
     }
 
 def optimizer_manifest_path():
-    return Path(config.PROJECT_DIR) / 'global_optimizer.json'
+    return Path(config.GLOBAL_OPTIMIZER_FILE)
 
 def training_cycle_state_path():
-    return Path(config.PROJECT_DIR) / 'optimization_cycle_state.json'
+    return Path(config.TRAINING_CYCLE_STATE_FILE)
 
 def load_training_cycle_state():
     default_state = {
@@ -211,7 +220,10 @@ def load_training_cycle_state():
 def _trade_quality_metrics(strategy_name):
     rows = [
         row for row in reversed(state.trade_journal or [])
-        if row.get('strategy') == strategy_name and row.get('status') == 'closed'
+        if row.get('strategy') == strategy_name
+        and row.get('status') == 'closed'
+        and row.get('eligible_for_learning') is True
+        and row.get('accounting_status') == 'verified'
     ]
     planned_rrs = []
     entry_slippage = []
@@ -655,18 +667,49 @@ def build_sizing_plan(strategy_name, category, confidence, leverage, usdt_availa
         'target_notional': round(target_margin * leverage, 2),
     }
 
+def _apply_price_tier_exit_bounds(min_sl_pct, sl_cap, tp_cap, min_tp_pct, current_price):
+    if current_price <= 0:
+        return min_sl_pct, sl_cap, tp_cap, min_tp_pct
+
+    # Low-priced contracts should not inherit overly wide percent caps from higher-priced regimes.
+    if current_price < 0.1:
+        return (
+            min(min_sl_pct, 0.0025),
+            min(sl_cap, 0.0120),
+            min(tp_cap, 0.0300),
+            min(min_tp_pct, 0.0040),
+        )
+    if current_price < 1.0:
+        return (
+            min(min_sl_pct, 0.0030),
+            min(sl_cap, 0.0150),
+            min(tp_cap, 0.0350),
+            min(min_tp_pct, 0.0050),
+        )
+    return min_sl_pct, sl_cap, tp_cap, min_tp_pct
+
 def apply_exit_state_limits(strategy_name, state, sl_dist, tp_dist, current_price):
     limits = config.EXIT_STATE_LIMITS.get(strategy_name, {}).get(state)
     if not limits or current_price <= 0:
         return sl_dist, tp_dist, None
         
     min_sl_pct = config.MIN_EXIT_DISTANCE_PCT.get(strategy_name, 0.0035)
+    min_tp_pct = config.MIN_TARGET_DISTANCE_PCT.get(strategy_name, 0.006)
     sl_cap = limits['sl_cap']
     tp_cap = limits['tp_cap']
     rr_floor = limits['rr_floor']
-    
+
+    min_sl_pct, sl_cap, tp_cap, min_tp_pct = _apply_price_tier_exit_bounds(
+        min_sl_pct,
+        sl_cap,
+        tp_cap,
+        min_tp_pct,
+        current_price,
+    )
+
     sl_pct = clamp(sl_dist / current_price, min_sl_pct, sl_cap)
     tp_pct = min(tp_dist / current_price, tp_cap)
+    tp_pct = max(tp_pct, min_tp_pct)
     tp_pct = max(tp_pct, sl_pct * rr_floor)
     
     if tp_pct > tp_cap:
@@ -715,18 +758,29 @@ def apply_adaptive_exits(plan, strategy_name, current_price, direction, atr_pct,
     profile = strategy_profile(strategy_name)
     effective_atr = clamp(atr_pct if atr_pct else 0.008, 0.005, 0.05)
     atr_abs = current_price * effective_atr
-    sl_dist = max(atr_abs * profile['sl_atr'], current_price * 0.003)
-    tp_dist = max(atr_abs * profile['tp_atr'], sl_dist * profile['min_rr'])
+    state_verdict = (optimizer or {}).get('state', 'steady')
+    min_sl_pct = config.MIN_EXIT_DISTANCE_PCT.get(strategy_name, 0.0035)
+    min_tp_pct = config.MIN_TARGET_DISTANCE_PCT.get(strategy_name, 0.006)
+    sl_cap_pct = config.EXIT_STATE_LIMITS.get(strategy_name, {}).get(state_verdict, {}).get('sl_cap', 0.025)
+    tp_cap_pct = config.EXIT_STATE_LIMITS.get(strategy_name, {}).get(state_verdict, {}).get('tp_cap', 0.060)
+    min_sl_pct, sl_cap_pct, tp_cap_pct, min_tp_pct = _apply_price_tier_exit_bounds(
+        min_sl_pct,
+        sl_cap_pct,
+        tp_cap_pct,
+        min_tp_pct,
+        current_price,
+    )
+    sl_dist = clamp(max(atr_abs * profile['sl_atr'], current_price * min_sl_pct), current_price * min_sl_pct, current_price * sl_cap_pct)
+    tp_dist = max(atr_abs * profile['tp_atr'], sl_dist * profile['min_rr'], current_price * min_tp_pct)
     structural_stop = as_float(plan.get('structural_stop'))
     stop_is_valid = structural_stop > 0 and (
         structural_stop < current_price if direction == 'bullish'
         else structural_stop > current_price
     )
-    state_verdict = (optimizer or {}).get('state', 'steady')
     sl_dist, tp_dist, clamp_note = apply_exit_state_limits(strategy_name, state_verdict, sl_dist, tp_dist, current_price)
     if stop_is_valid:
-        structural_sl_dist = clamp(abs(current_price - structural_stop), sl_dist, current_price * 0.025)
-        sl_dist = max(sl_dist, structural_sl_dist)
+        structural_sl_dist = clamp(abs(current_price - structural_stop), current_price * min_sl_pct, current_price * sl_cap_pct)
+        sl_dist = min(max(sl_dist, structural_sl_dist), current_price * sl_cap_pct)
 
     structural_target = as_float(plan.get('structural_target'))
     target_is_valid = (
@@ -735,12 +789,13 @@ def apply_adaptive_exits(plan, strategy_name, current_price, direction, atr_pct,
     )
     if structural_target > 0 and target_is_valid:
         structural_tp_dist = abs(structural_target - current_price)
-        tp_dist = min(tp_dist, max(structural_tp_dist, sl_dist * 1.25))
+        tp_dist = min(tp_dist, max(structural_tp_dist, sl_dist * 1.25, current_price * min_tp_pct))
     tp_dist = max(
         tp_dist,
         sl_dist * 1.25,
-        current_price * config.MIN_TARGET_DISTANCE_PCT.get(strategy_name, 0.006),
+        current_price * min_tp_pct,
     )
+    tp_dist = min(tp_dist, current_price * tp_cap_pct)
 
     if direction == 'bullish':
         plan['sl'] = current_price - sl_dist
@@ -874,34 +929,34 @@ def create_mode_direct_setup(strategy_name, df, trends, htf_bull, htf_bear):
         long_reentry = previous['low'] <= lower_prev and signal['close'] > lower_now and bull_reversal and rsi < 45
         short_reentry = previous['high'] >= upper_prev and signal['close'] < upper_now and bear_reversal and rsi > 55
         if long_reentry:
-            return build_direct_mode_setup(df, 'bullish', 'Mean BB Re-entry Long', lower_now, min(previous['low'], signal['low']) - avg_range * 0.15, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bullish', 'Mean BB Re-entry Long', lower_now, min(previous['low'], signal['low']) - avg_range * 0.12, df['bb_mid'].iloc[-1])
         elif short_reentry:
-            return build_direct_mode_setup(df, 'bearish', 'Mean BB Re-entry Short', upper_now, max(previous['high'], signal['high']) + avg_range * 0.15, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bearish', 'Mean BB Re-entry Short', upper_now, max(previous['high'], signal['high']) + avg_range * 0.12, df['bb_mid'].iloc[-1])
         
         long_rsi_snap = rsi < 32 and bull_reversal
         short_rsi_snap = rsi > 68 and bear_reversal
         if long_rsi_snap:
-            return build_direct_mode_setup(df, 'bullish', 'Mean RSI Snapback Long', (signal['open'] + signal['close'])/2, signal['low'] - avg_range * 0.20, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bullish', 'Mean RSI Snapback Long', (signal['open'] + signal['close'])/2, signal['low'] - avg_range * 0.14, df['bb_mid'].iloc[-1])
         elif short_rsi_snap:
-            return build_direct_mode_setup(df, 'bearish', 'Mean RSI Snapback Short', (signal['open'] + signal['close'])/2, signal['high'] + avg_range * 0.20, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bearish', 'Mean RSI Snapback Short', (signal['open'] + signal['close'])/2, signal['high'] + avg_range * 0.14, df['bb_mid'].iloc[-1])
 
     if strategy_name == 'Contrarian':
         # Exhaustion proof: RSI and candle reversal at extreme levels
         oversold = rsi < 28
         overbought = rsi > 72
         if oversold and bull_reversal:
-            return build_direct_mode_setup(df, 'bullish', 'Contrarian Reversal Long', signal['close'], signal['low'] - avg_range * 0.25, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bullish', 'Contrarian Reversal Long', signal['close'], signal['low'] - avg_range * 0.18, df['bb_mid'].iloc[-1])
         elif overbought and bear_reversal:
-            return build_direct_mode_setup(df, 'bearish', 'Contrarian Reversal Short', signal['close'], signal['high'] + avg_range * 0.25, df['bb_mid'].iloc[-1])
+            return build_direct_mode_setup(df, 'bearish', 'Contrarian Reversal Short', signal['close'], signal['high'] + avg_range * 0.18, df['bb_mid'].iloc[-1])
 
     if strategy_name == 'SqueezeHunter':
         if squeeze_hunter_release_ready(df):
             # Directional squeeze breakout
             direction = 'bullish' if signal['close'] > previous['high'] and signal['close'] > df['bb_mid'].iloc[-1] else 'bearish'
             if direction == 'bullish' and bull_reversal:
-                return build_direct_mode_setup(df, 'bullish', 'Squeeze Expansion Long', signal['close'], df['bb_lower'].iloc[-1], df['bb_upper'].iloc[-1] + avg_range * 1.50)
+                return build_direct_mode_setup(df, 'bullish', 'Squeeze Expansion Long', signal['close'], df['bb_lower'].iloc[-1], df['bb_upper'].iloc[-1] + avg_range * 0.95)
             elif direction == 'bearish' and bear_reversal:
-                return build_direct_mode_setup(df, 'bearish', 'Squeeze Expansion Short', signal['close'], df['bb_upper'].iloc[-1], df['bb_lower'].iloc[-1] - avg_range * 1.50)
+                return build_direct_mode_setup(df, 'bearish', 'Squeeze Expansion Short', signal['close'], df['bb_upper'].iloc[-1], df['bb_lower'].iloc[-1] - avg_range * 0.95)
 
     return None
 

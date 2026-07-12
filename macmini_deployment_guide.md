@@ -53,7 +53,11 @@ The bootstrap script will:
 - back up any existing `active_trades_<NODE_NAME>.json`
 - back up legacy `trade_journal.json`
 - back up legacy `active_trades.json`
+- write `zero_start_state_<NODE_NAME>.json`
 - create fresh empty JSON files for the current node
+
+The normal launchers also re-check the zero-start manifest, so a brand new
+machine still starts from 0 even if you skip the explicit bootstrap step.
 
 If you want to keep the old machine's history instead of starting fresh, copy these files before first launch:
 

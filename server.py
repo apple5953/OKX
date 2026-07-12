@@ -1,25 +1,39 @@
+import json
 import os
 import sys
 import time
 import threading
 from server_core import config, state, utils, okx_client, strategies, execution, engine, web_server
 
-# Load existing state
-state.active_trades = utils.load_json_list(config.TRADE_FILE, 'active trades')
-if not os.path.exists(config.TRADE_FILE):
-    try:
-        utils.write_json_atomic(config.TRADE_FILE, state.active_trades)
-    except Exception as e:
-        print(f"Failed to initialize active trades file {config.TRADE_FILE}: {e}")
+def _load_state_from_disk():
+    # Keep import-time state reads lightweight; zero-start happens only from the
+    # real app entrypoint so tests and helpers do not accidentally wipe files.
+    state.active_trades = utils.load_json_list(config.TRADE_FILE, 'active trades')
+    if not os.path.exists(config.TRADE_FILE):
+        try:
+            utils.write_json_atomic(config.TRADE_FILE, state.active_trades)
+        except Exception as e:
+            print(f"Failed to initialize active trades file {config.TRADE_FILE}: {e}")
 
-state.trade_journal = utils.load_json_list(config.JOURNAL_FILE, 'journal file')
-if not os.path.exists(config.JOURNAL_FILE):
-    try:
-        utils.write_json_atomic(config.JOURNAL_FILE, state.trade_journal)
-    except Exception as e:
-        print(f"Failed to initialize journal file {config.JOURNAL_FILE}: {e}")
+    state.trade_journal = utils.load_json_list(config.JOURNAL_FILE, 'journal file')
+    if not os.path.exists(config.JOURNAL_FILE):
+        try:
+            utils.write_json_atomic(config.JOURNAL_FILE, state.trade_journal)
+        except Exception as e:
+            print(f"Failed to initialize journal file {config.JOURNAL_FILE}: {e}")
 
-state.trade_id_counter = max([t['id'] for t in state.active_trades], default=0) + 1
+    state.trade_id_counter = max([t['id'] for t in state.active_trades], default=0) + 1
+
+    # Rebuild protection metadata from journal rows so restarts do not drop TP/SL state.
+    try:
+        if engine.reconcile_active_trades_with_journal(write_back=True):
+            state.trade_id_counter = max([t['id'] for t in state.active_trades], default=0) + 1
+    except Exception as reconcile_err:
+        print(f"[Startup] Failed to reconcile active trades with journal: {reconcile_err}")
+
+
+# Load existing state for import-time compatibility.
+_load_state_from_disk()
 
 # Re-export variables for compatibility with tests & external scripts
 active_trades = state.active_trades
@@ -75,6 +89,10 @@ class ServerModuleWrapper(object):
             object.__setattr__(self, name, value)
 
 if __name__ == '__main__':
+    # V13 zero-start bootstrap: back up polluted history and start each generation from a clean local state.
+    utils.ensure_zero_start_storage()
+    _load_state_from_disk()
+
     # Initialize scanner symbols
     state.global_symbols, state.global_symbol_categories = okx_client.get_top_symbols_and_categories()
     

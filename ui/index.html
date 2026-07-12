@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>&#x8AE7;&#x6CE2;&#x76C8;&#x5229;&#x6A5F;&#x5668;&#x4EBA;</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="style.css?v=7">
+    <link rel="stylesheet" href="style.css?v=9">
     <style>
         .pulse-dot {
             width: 8px;
@@ -47,16 +47,31 @@
                 <button id="reset-opt-btn" class="live-chip" style="background: rgba(244,63,94,0.15); border: 1px solid rgba(244,63,94,0.3); color: #f43f5e; cursor: pointer; transition: all 0.2s;" onclick="resetOptimizer()">
                     <span>🔄 重製所有模式數值</span>
                 </button>
+                <button id="reset-training-btn" class="live-chip" style="background: rgba(251,146,60,0.15); border: 1px solid rgba(251,146,60,0.35); color: #fb923c; cursor: pointer; transition: all 0.2s;" onclick="resetTraining()">
+                    <span>一鍵重置訓練</span>
+                </button>
                 <button id="deposit-demo-btn" class="live-chip" style="background: rgba(14,165,233,0.15); border: 1px solid rgba(14,165,233,0.3); color: #0ea5e9; cursor: pointer; transition: all 0.2s;" onclick="depositDemoAsset()">
                     <span>💵 模擬充值 5000U</span>
                 </button>
             </div>
         </header>
 
+        <section class="version-banner" id="version-banner">
+            <div class="version-banner-main">
+                <span class="version-badge">V13</span>
+                <strong>零起點已啟用</strong>
+                <span id="version-banner-state">首次啟動與重置流程已從 0 重新建立</span>
+            </div>
+            <div class="version-banner-meta">
+                <span id="version-banner-reset">reset: -</span>
+                <span id="version-banner-node">node: -</span>
+            </div>
+        </section>
+
         <section class="hero-grid">
             <div class="capital-panel">
                 <div class="section-title">
-                    <span id="growth-title">本次啟動進度</span>
+                    <span id="growth-title">V13 累積盈虧曲線</span>
                     <strong id="growth-progress">0%</strong>
                 </div>
                 <div class="capital-values">
@@ -69,11 +84,11 @@
                         <strong id="usdt-avail">$0.00</strong>
                     </div>
                     <div>
-                        <span>&#x672A;&#x5BE6;&#x73FE;&#x640D;&#x76CA;</span>
+                        <span>未實現損益</span>
                         <strong id="total-profit">+$0.00</strong>
                     </div>
                     <div>
-                        <span id="version-pnl-label">V9 策略總損益</span>
+                        <span id="version-pnl-label">V13 累積盈虧</span>
                         <strong id="capital-change">$0.00</strong>
                     </div>
                 </div>
@@ -120,6 +135,19 @@
             <div id="bot-report" class="bot-report"></div>
         </section>
 
+        <section class="health-panel" id="health-check-panel">
+            <div class="panel-head">
+                <h2>V13 健康檢查</h2>
+                <div class="health-actions">
+                    <span class="hint" id="health-check-state">載入中...</span>
+                    <button class="health-btn" type="button" onclick="fetchHealthCheck()">重新整理</button>
+                </div>
+            </div>
+            <div id="health-summary" class="health-summary"></div>
+            <div id="health-blocks" class="health-blocks"></div>
+            <div id="health-detail" class="health-detail-grid"></div>
+        </section>
+
         <section class="mode-panel">
             <div class="panel-head">
                 <h2>&#x6A21;&#x5F0F;&#x63A7;&#x5236;&#x53F0;</h2>
@@ -164,7 +192,7 @@
         <section class="data-panel" style="margin-top: 20px; background: rgba(30, 30, 45, 0.4); border: 1px solid rgba(255,255,255,0.08);">
             <div class="panel-head">
                 <h2 style="color: #60a5fa; display: flex; align-items: center; gap: 8px;">
-                    <span class="pulse-dot"></span> 🤖 AI 智能學習進化日誌 (ML Evolutionary Journal)
+                    <span class="pulse-dot"></span> 🤖 AI 智能學習進化日誌
                 </h2>
                 <span style="font-size: 11px; color: #a1a1aa;">自動監控平倉數據 • 動態調優獲利參數</span>
             </div>
@@ -245,6 +273,6 @@
             </div>
         </section>
     </div>
-    <script src="app.js?v=33"></script>
+    <script src="app.js?v=35"></script>
 </body>
 </html>

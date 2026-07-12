@@ -30,7 +30,8 @@ from .strategies import (
 from .execution import (
     expected_trade_edge, risk_based_leverage_cap, execute_bounded_limit_entry, rebase_plan_to_fill,
     place_exact_fill_protection, emergency_close_unprotected, protective_algo_targets,
-    amend_protective_stop, fetch_exchange_max_contracts, protection_retry_delay, okx_order_failed
+    amend_protective_stop, fetch_exchange_max_contracts, protection_retry_delay, okx_order_failed,
+    set_okx_leverage
 )
 
 def active_net_key(t):
@@ -52,17 +53,165 @@ def okx_position_not_found_error(code=None, message=None):
         or 'does not exist' in lowered
     )
 
-def close_orphan_trade_record(trade, reason='exchange_position_missing'):
+def close_orphan_trade_record(
+    trade,
+    reason='exchange_position_missing',
+    protection_status='confirmed',
+    protection_error=None,
+):
     trade['status'] = 'closed'
     trade['exit_reason'] = reason
     trade['emergency_close_submitted'] = True
-    trade['protection_status'] = 'confirmed'
-    trade['protection_error'] = None
+    trade['protection_status'] = protection_status
+    trade['protection_error'] = protection_error
     trade['sync_status'] = 'closed_without_open_position'
     trade['trailing_stage'] = 'protection_reconciled'
 
+def protection_status_rank(status):
+    text = str(status or '').lower().strip()
+    return {
+        'confirmed': 3,
+        'failed': 2,
+        'pending': 1,
+        'unconfirmed': 0,
+        '': 0,
+        'none': 0,
+    }.get(text, 0)
+
+def prefer_protection_status(current_status, recovered_status):
+    if protection_status_rank(recovered_status) > protection_status_rank(current_status):
+        return recovered_status
+    return current_status
+
 def normalize_symbol_key(symbol):
     return str(symbol or '').upper().replace('/', '').replace(':USDT', '').replace('-USDT-SWAP', 'USDT')
+
+def is_known_strategy_name(strategy):
+    return str(strategy or '') in config.STRATEGY_PROFILES
+
+def recover_trade_lifecycle_from_journal(pos=None, direction=None):
+    pos = pos or {}
+    pos_id = str(pos.get('id') or pos.get('posId') or '')
+    inst_id = str(pos.get('info', {}).get('instId', '') or pos.get('instId') or '')
+    direction_text = str(direction or pos.get('side') or pos.get('direction') or '').lower()
+    fallback_manual = None
+
+    for source in (reversed(state.active_trades), reversed(state.trade_journal)):
+        for row in source:
+            if pos_id and str(row.get('posId') or '') != pos_id:
+                continue
+            row_inst = str(row.get('instId') or '')
+            row_dir = str(row.get('direction') or '').lower()
+            if inst_id and row_inst and inst_id != row_inst:
+                continue
+            if row_dir and direction_text and row_dir != direction_text:
+                continue
+            if str(row.get('strategy') or '') == 'Manual':
+                if fallback_manual is None:
+                    fallback_manual = row
+                continue
+            return row
+
+    if fallback_manual is not None:
+        return fallback_manual
+
+    if inst_id and direction_text:
+        for source in (reversed(state.active_trades), reversed(state.trade_journal)):
+            for row in source:
+                row_inst = str(row.get('instId') or '')
+                row_dir = str(row.get('direction') or '').lower()
+                if row_inst and inst_id and row_inst != inst_id:
+                    continue
+                if row_dir and direction_text and row_dir != direction_text:
+                    continue
+                if str(row.get('strategy') or '') not in ['', 'Manual', 'Mixed']:
+                    return row
+    return None
+
+def reconcile_active_trades_with_journal(write_back=False):
+    changed = False
+    for trade in state.active_trades:
+        if trade.get('status') != 'active':
+            continue
+
+        matched = recover_trade_lifecycle_from_journal(
+            {
+                'id': trade.get('posId'),
+                'posId': trade.get('posId'),
+                'instId': trade.get('instId'),
+                'side': trade.get('direction'),
+                'direction': trade.get('direction'),
+            },
+            trade.get('direction'),
+        )
+        if not matched:
+            continue
+
+        matched_strategy = str(matched.get('strategy') or '')
+        current_strategy = str(trade.get('strategy') or '')
+        preserve_current_strategy = is_known_strategy_name(current_strategy) and matched_strategy in ['', 'Manual', 'Mixed']
+
+        for key in [
+            'strategy', 'strategy_version', 'lifecycle_id', 'mode_reason',
+            'entry_reason', 'runner_policy', 'optimizer', 'signal_candle',
+            'original_tp_dist', 'original_sl_dist', 'filled_contracts',
+            'protection_order_id', 'protection_order_ids', 'half_tp_done',
+            'tp_removed', 'trailing_stage', 'current_r', 'highest_r',
+            'highest_pnl', 'highest_progress', 'missing_protection_checks',
+            'emergency_close_submitted', 'sync_status', 'protection_error',
+        ]:
+            if preserve_current_strategy and key in {
+                'strategy', 'strategy_version', 'lifecycle_id', 'mode_reason',
+                'entry_reason', 'runner_policy', 'optimizer', 'signal_candle',
+                'original_tp_dist', 'original_sl_dist', 'filled_contracts',
+                'current_r', 'highest_r', 'highest_pnl', 'highest_progress',
+                'missing_protection_checks', 'emergency_close_submitted',
+                'sync_status', 'protection_error',
+            }:
+                continue
+            value = matched.get(key)
+            if value not in [None, '', []] and trade.get(key) != value:
+                trade[key] = value
+                changed = True
+
+        for key in ['sl', 'tp1', 'entry']:
+            current_value = as_float(trade.get(key))
+            recovered_value = as_float(matched.get(key))
+            if current_value <= 0 and recovered_value > 0:
+                trade[key] = recovered_value
+                changed = True
+
+        current_status = str(trade.get('protection_status') or '').lower()
+        recovered_status = str(matched.get('protection_status') or '').lower()
+        preferred_status = prefer_protection_status(current_status, recovered_status)
+        if preferred_status and preferred_status != current_status:
+            trade['protection_status'] = preferred_status
+            changed = True
+        elif not current_status and as_float(trade.get('sl')) > 0 and as_float(trade.get('tp1')) > 0:
+            trade['protection_status'] = 'confirmed'
+            changed = True
+
+        if matched.get('protection_error') is not None and trade.get('protection_error') != matched.get('protection_error'):
+            trade['protection_error'] = matched.get('protection_error')
+            changed = True
+
+        recovered_ids = [str(x) for x in (matched.get('protection_order_ids') or []) if x]
+        if recovered_ids:
+            merged_ids = list(dict.fromkeys(
+                [str(x) for x in (trade.get('protection_order_ids') or []) if x] + recovered_ids
+            ))
+            if merged_ids != list(trade.get('protection_order_ids') or []):
+                trade['protection_order_ids'] = merged_ids
+                changed = True
+
+        recovered_id = matched.get('protection_order_id')
+        if recovered_id and trade.get('protection_order_id') != recovered_id:
+            trade['protection_order_id'] = recovered_id
+            changed = True
+
+    if changed and write_back:
+        write_json_atomic(config.TRADE_FILE, state.active_trades)
+    return changed
 
 def orphan_bypass_symbol(inst_id):
     return str(inst_id or '').upper() in {s.upper() for s in config.ORPHAN_BYPASS_SYMBOLS}
@@ -104,6 +253,12 @@ def annotate_orphan_positions(records):
         except Exception as exc:
             record['orphan_bypass'] = False
             record['orphan_error'] = str(exc)
+            if orphan_bypass_symbol(inst_id):
+                record['orphan_bypass'] = True
+                record['non_blocking_active'] = True
+                record['orphan_reason'] = (
+                    f"orphan bypass: unable to verify live order-book state ({exc})"
+                )
     return records
 
 def reserve_symbol_for_entry(symbol):
@@ -164,11 +319,23 @@ def merge_active_trade(existing, incoming):
         'posId', 'instId', 'entry', 'current', 'sl', 'tp1', 'pnl', 'percentage',
         'leverage', 'initialMargin', 'notional', 'liquidationPrice', 'marginRatio',
         'runner_policy', 'optimizer', 'sizing_plan', 'planned_margin',
-        'planned_notional', 'planned_leverage',
+        'planned_notional', 'planned_leverage', 'protection_order_id',
+        'protection_order_ids',
+        'missing_protection_checks', 'emergency_close_submitted', 'sync_status',
+        'trailing_stage', 'entry_reason', 'mode_reason', 'signal_candle',
+        'original_tp_dist', 'original_sl_dist', 'filled_contracts',
+        'highest_progress', 'highest_r', 'highest_pnl', 'current_r',
     ]:
         val = incoming.get(key)
-        if val not in [None, '', 0]:
+        if val not in [None, '', 0, [], {}]:
             existing[key] = val
+
+    existing['protection_status'] = prefer_protection_status(
+        existing.get('protection_status'),
+        incoming.get('protection_status'),
+    )
+    if incoming.get('protection_error') not in [None, '']:
+        existing['protection_error'] = incoming.get('protection_error')
 
     existing['status'] = 'active'
     existing['last_signal_id'] = incoming.get('id', existing.get('last_signal_id'))
@@ -199,13 +366,12 @@ def normalize_okx_position(pos):
     info = pos.get('info') or {}
     raw_symbol = str(pos.get('symbol') or pos.get('instId') or info.get('instId') or '')
     inst_id = str(info.get('instId') or pos.get('instId') or raw_symbol)
+    pos_qty = as_float(pos.get('contracts') or pos.get('pos') or info.get('pos'))
+    raw_side = pos.get('side') or pos.get('posSide') or info.get('posSide')
     side = normalize_position_side(
-        pos.get('side')
-        or pos.get('posSide')
-        or info.get('posSide')
-        or ('long' if as_float(pos.get('pos') or info.get('pos')) >= 0 else 'short')
+        raw_side if str(raw_side or '').lower() not in {'', 'net'} else ('long' if pos_qty >= 0 else 'short')
     )
-    contracts = as_float(pos.get('contracts') or pos.get('pos') or info.get('pos'))
+    contracts = pos_qty
     mark_price = as_float(pos.get('markPrice') or pos.get('markPx'))
     entry_price = as_float(pos.get('entryPrice') or pos.get('avgPx') or info.get('avgPx'))
     pnl = as_float(pos.get('unrealizedPnl', pos.get('upl', 0.0)))
@@ -419,8 +585,8 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                     active_min_profit = min_profit * cat_prof['profit_mult']
                         
                     # DYNAMIC ATR-BASED STOP LOSS ADAPTATION
-                    # Ensure SL is at least 60% of the average candle wick (ATR) so it doesn't get swept by noise
-                    active_sl_buffer = max(base_sl_buffer, atr_pct * mode_prof['sl_atr'] * 0.35)
+                    # Keep the ATR floor tight enough to avoid over-widening exits on low-priced contracts.
+                    active_sl_buffer = max(base_sl_buffer, atr_pct * mode_prof['sl_atr'] * 0.22)
 
                     # Apply alignment penalty to tolerance (make it stricter for bad regimes)
                     active_tolerance = active_tolerance * alignment_penalty
@@ -500,7 +666,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                         radar_item['setup_source'] = getattr(best_p, 'setup_source', 'harmonic')
                         d_price = best_p.d.price
                         prz_width = best_p.prz_high - best_p.prz_low
-                        buffer = max(prz_width * 0.15, abs(d_price) * 0.002, avg_range * 0.35)
+                        buffer = max(prz_width * 0.15, abs(d_price) * 0.002, avg_range * 0.25)
                         try:
                             radar_plan = build_trade_plan(best_p.direction, best_p.x.price, best_p.a.price, best_p.c.price, d_price, best_p.pattern_name, min_rr=0.2, sl_buffer_pct=active_sl_buffer)
                             radar_plan['structural_stop'] = getattr(best_p, 'stop_reference', None)
@@ -539,7 +705,7 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                     for p in patterns:
                         d_price = p.d.price
                         prz_width = p.prz_high - p.prz_low
-                        buffer = max(prz_width * 0.15, abs(d_price) * 0.002, avg_range * 0.35)
+                        buffer = max(prz_width * 0.15, abs(d_price) * 0.002, avg_range * 0.25)
                         
                         # CRITICAL ENTRY POSITION OPTIMIZATION:
                         if strategy_name in ['SqueezeHunter', 'Contrarian', 'MeanReversion']:
@@ -804,10 +970,14 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                 target_notional = 0.0
                                 size = 0
                                 current_price = live_price
-                                contract_size = float(okx.markets[symbol]['contractSize'])
+                                market_meta = (getattr(okx, 'markets', None) or {}).get(symbol) or {}
+                                contract_size = as_float(
+                                    market_meta.get('contractSize') or market_meta.get('contract_size') or 1.0,
+                                    1.0,
+                                )
                                 for lev in leverages_to_try:
                                     try:
-                                        okx.set_leverage(lev, symbol)
+                                        set_okx_leverage(lev, symbol)
                                     except Exception:
                                         continue
 
@@ -877,7 +1047,12 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
                                     )
                                     current_potentials.append(signal_obj)
                                     continue
-                                available_usdt = as_float(state.account_data.get('usdtAvail'))
+                                account_data = state.account_data or {}
+                                available_usdt = max(
+                                    as_float(account_data.get('usdtAvail')),
+                                    as_float(account_data.get('usdtEq')),
+                                    as_float(account_data.get('totalEq')),
+                                )
                                 if available_usdt <= 0 or actual_order_margin > available_usdt * 0.95:
                                     print(
                                         f"[{strategy_name}] Skip {symbol}: actual margin {actual_order_margin:.2f}U "
@@ -1063,6 +1238,10 @@ def run_strategy(strategy_name, timeframe, tolerance, sl_buffer_pct, trend_tf, t
 def background_sync_loop():
     while True:
         try:
+            # Keep in-memory active trades aligned with the journal before we
+            # evaluate live positions or write the dashboard snapshot.
+            reconcile_active_trades_with_journal(write_back=False)
+
             # 1. Sync Account Balance
             new_account_data = fetch_okx_account_snapshot(force=True)
             if new_account_data:
@@ -1081,6 +1260,7 @@ def background_sync_loop():
                             return sym.replace('/', '').replace(':USDT', '').replace('-USDT', '').replace('USDT', '').upper()
                         pos = next((p for p in positions if get_base_ccy(p['symbol']) == get_base_ccy(t['symbol']) and ('long' if p['side'] in ['long', 'buy'] else 'short') == ('long' if t['direction'] in ['long', 'buy'] else 'short')), None)
                         if pos:
+                            journal_trade = recover_trade_lifecycle_from_journal(pos, t.get('direction'))
                             t['current'] = float(pos['markPrice'])
                             if pos.get('entryPrice'):
                                 t['entry'] = float(pos['entryPrice']) # CRITICAL: Use the REAL exchange fill price, not theoretical signal price
@@ -1093,6 +1273,34 @@ def background_sync_loop():
                             t['notional'] = pos.get('notional')
                             t['liquidationPrice'] = pos.get('liquidationPrice')
                             t['marginRatio'] = pos.get('marginRatio')
+                            if journal_trade:
+                                for key in [
+                                    'strategy', 'strategy_version', 'lifecycle_id', 'mode_reason',
+                                    'entry_reason', 'runner_policy', 'optimizer', 'signal_candle',
+                                    'original_tp_dist', 'original_sl_dist', 'filled_contracts',
+                                    'protection_order_id', 'protection_order_ids', 'half_tp_done',
+                                    'tp_removed', 'trailing_stage', 'current_r', 'highest_r',
+                                    'highest_pnl', 'highest_progress',
+                                ]:
+                                    value = journal_trade.get(key)
+                                    if value not in [None, '', []]:
+                                        t[key] = value
+                                if as_float(t.get('sl')) <= 0 and as_float(journal_trade.get('sl')) > 0:
+                                    t['sl'] = as_float(journal_trade.get('sl'))
+                                if as_float(t.get('tp1')) <= 0 and as_float(journal_trade.get('tp1')) > 0:
+                                    t['tp1'] = as_float(journal_trade.get('tp1'))
+                                if as_float(t.get('entry')) <= 0 and as_float(journal_trade.get('entry')) > 0:
+                                    t['entry'] = as_float(journal_trade.get('entry'))
+                                if journal_trade.get('protection_status'):
+                                    t['protection_status'] = journal_trade.get('protection_status')
+                                elif as_float(t.get('sl')) > 0 and as_float(t.get('tp1')) > 0:
+                                    t['protection_status'] = 'confirmed'
+                                if journal_trade.get('protection_error') is not None:
+                                    t['protection_error'] = journal_trade.get('protection_error')
+                                if journal_trade.get('protection_order_ids'):
+                                    t['protection_order_ids'] = list(journal_trade.get('protection_order_ids') or [])
+                                if journal_trade.get('protection_order_id'):
+                                    t['protection_order_id'] = journal_trade.get('protection_order_id')
                         else:
                             if cycle_history is None:
                                 cycle_history = sync_exchange_history(force=True)
@@ -1168,47 +1376,38 @@ def background_sync_loop():
                         for t in state.active_trades
                     )
                     if not exists:
-                        recovered_trade = None
-                        fallback_manual = None
+                        recovered_trade = recover_trade_lifecycle_from_journal(pos, direction)
                         pos_id = str(pos.get('id') or pos.get('posId') or '')
                         inst_id = str(pos.get('info', {}).get('instId', '') or pos.get('instId') or '')
-                        for row in reversed(state.trade_journal):
-                            if pos_id and str(row.get('posId') or '') != pos_id:
-                                continue
-                            row_inst = str(row.get('instId') or '')
-                            row_dir = str(row.get('direction') or '').lower()
-                            if inst_id and row_inst and inst_id != row_inst:
-                                continue
-                            if row_dir and row_dir != str(direction).lower():
-                                continue
-                            if str(row.get('strategy') or '') == 'Manual':
-                                if fallback_manual is None:
-                                    fallback_manual = row
-                                continue
-                            recovered_trade = row
-                            break
-                        if recovered_trade is None:
-                            recovered_trade = fallback_manual
-                        if recovered_trade and str(recovered_trade.get('strategy') or '') == 'Manual':
-                            alt_trade = next(
-                                (
-                                    row for row in reversed(state.trade_journal)
-                                    if str(row.get('instId') or '') == inst_id
-                                    and str(row.get('direction') or '').lower() == str(direction).lower()
-                                    and str(row.get('strategy') or '') not in ['', 'Manual', 'Mixed']
-                                ),
-                                None,
-                            )
-                            if alt_trade is not None:
-                                recovered_trade = alt_trade
+                        raw_entry = as_float(pos.get('entryPrice', 0))
+                        raw_sl = as_float((recovered_trade or {}).get('sl'))
+                        raw_tp1 = as_float((recovered_trade or {}).get('tp1'))
+                        protection_status = (recovered_trade or {}).get('protection_status')
+                        if raw_sl > 0 and raw_tp1 > 0 and not protection_status:
+                            protection_status = 'confirmed'
                         state.active_trades.append({
                             "id": state.trade_id_counter, "posId": pos.get('id'), "instId": pos.get('info', {}).get('instId', ''),
-                            "symbol": sym, "direction": direction, "pattern": "Manual / Unsynced", "status": "active",
-                            "entry": float(pos.get('entryPrice', 0)), "current": float(pos['markPrice']), "sl": 0, "tp1": 0,
+                            "symbol": sym, "direction": direction, "pattern": (recovered_trade or {}).get('pattern', "Manual / Unsynced"), "status": "active",
+                            "entry": float((recovered_trade or {}).get('entry') or raw_entry), "current": float(pos['markPrice']), "sl": raw_sl, "tp1": raw_tp1,
                             "pnl": float(pos.get('unrealizedPnl', 0.0)), "percentage": float(pos.get('percentage', 0.0)),
-                            "rsi_on_entry": '--', "trends": {}, "strategy": (recovered_trade or {}).get('strategy', 'Manual'), "leverage": pos.get('leverage'),
+                            "rsi_on_entry": (recovered_trade or {}).get('rsi_on_entry', '--'), "trends": (recovered_trade or {}).get('trends', {}),
+                            "strategy": (recovered_trade or {}).get('strategy', 'Manual'), "leverage": pos.get('leverage'),
                             "initialMargin": pos.get('initialMargin'), "notional": pos.get('notional'),
-                            "liquidationPrice": pos.get('liquidationPrice'), "marginRatio": pos.get('marginRatio')
+                            "liquidationPrice": pos.get('liquidationPrice'), "marginRatio": pos.get('marginRatio'),
+                            "strategy_version": (recovered_trade or {}).get('strategy_version'),
+                            "lifecycle_id": (recovered_trade or {}).get('lifecycle_id'),
+                            "protection_status": protection_status if protection_status else ('confirmed' if raw_sl > 0 and raw_tp1 > 0 else 'unconfirmed'),
+                            "protection_error": (recovered_trade or {}).get('protection_error'),
+                            "protection_order_id": (recovered_trade or {}).get('protection_order_id'),
+                            "protection_order_ids": list((recovered_trade or {}).get('protection_order_ids') or []),
+                            "entry_reason": (recovered_trade or {}).get('entry_reason'),
+                            "mode_reason": (recovered_trade or {}).get('mode_reason'),
+                            "runner_policy": (recovered_trade or {}).get('runner_policy'),
+                            "optimizer": (recovered_trade or {}).get('optimizer'),
+                            "signal_candle": (recovered_trade or {}).get('signal_candle'),
+                            "original_tp_dist": (recovered_trade or {}).get('original_tp_dist'),
+                            "original_sl_dist": (recovered_trade or {}).get('original_sl_dist'),
+                            "filled_contracts": abs(as_float((recovered_trade or {}).get('filled_contracts') or pos.get('contracts') or pos.get('pos'))),
                         })
                         state.trade_id_counter += 1
 
@@ -1314,69 +1513,83 @@ def background_sync_loop():
                             if tp_ord > 0 and not t.get('tp1'):
                                 t['tp1'] = float(tp_ord)
 
-                        if protective_algos:
+                        protection_confirmed = str(t.get('protection_status') or '').lower() == 'confirmed'
+                        protection_present = (
+                            (
+                                bool(protective_algos)
+                                and as_float(t.get('sl')) > 0
+                                and as_float(t.get('tp1')) > 0
+                            )
+                            or (
+                                protection_confirmed
+                                and as_float(t.get('sl')) > 0
+                                and as_float(t.get('tp1')) > 0
+                            )
+                        )
+                        if protection_present:
                             t['missing_protection_checks'] = 0
                             t['protection_status'] = 'confirmed'
                             t['protection_error'] = None
-                        elif t.get('strategy') == 'Manual':
-                            # Manual positions do not trigger emergency close wind downs; just show status as confirmed or unconfirmed based on OCO presence
-                            t['missing_protection_checks'] = 0
-                            t['protection_status'] = 'confirmed' if protective_algos else None
-                            t['protection_error'] = None
-                        elif t.get('strategy_version') == config.STRATEGY_VERSION:
+                        else:
                             missing_checks = int(t.get('missing_protection_checks') or 0) + 1
                             t['missing_protection_checks'] = missing_checks
-                            if missing_checks >= config.PROTECTION_MISSING_CONFIRMATIONS:
-                                t['protection_status'] = 'failed'
-                                t['protection_error'] = 'OKX has no matching protective SL order'
-                            else:
-                                t['protection_status'] = 'pending'
-                                t['protection_error'] = None
-                            if missing_checks >= config.PROTECTION_MISSING_CONFIRMATIONS and not t.get('emergency_close_submitted'):
-                                open_pos = next(
-                                    (
-                                        p for p in positions
-                                        if str((p.get('info') or {}).get('instId') or '') == expected_inst_id
-                                    ),
-                                    None,
+                            t['protection_status'] = 'failed'
+                            t['protection_error'] = 'missing TP/SL protection'
+
+                            open_pos = next(
+                                (
+                                    p for p in positions
+                                    if str((p.get('info') or {}).get('instId') or '') == expected_inst_id
+                                ),
+                                None,
+                            )
+                            close_size = abs(as_float((open_pos or {}).get('contracts')))
+                            if close_size <= 0:
+                                close_size = abs(as_float(t.get('filled_contracts')))
+                            if open_pos is None or close_size <= 0:
+                                print(
+                                    f"[URGENT] {t['symbol']} is missing TP/SL and no live position match was found; "
+                                    "closing local record as quarantined."
                                 )
-                                close_size = as_float((open_pos or {}).get('contracts'))
-                                if close_size <= 0:
-                                    close_size = as_float(t.get('filled_contracts'))
-                                if open_pos is None or close_size <= 0:
-                                    print(
-                                        f"[URGENT] {t['symbol']} has no matching live OKX position; "
-                                        "marking local trade closed instead of sending emergency close."
+                                close_orphan_trade_record(
+                                    t,
+                                    'missing_tp_sl_protection',
+                                    protection_status='failed',
+                                    protection_error='missing TP/SL protection',
+                                )
+                                continue
+                            try:
+                                ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
+                                ok, ec, em = emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
+                                if ok:
+                                    t['emergency_close_submitted'] = True
+                                    t['protection_status'] = 'failed'
+                                    t['protection_error'] = 'missing TP/SL protection'
+                                    print(f"[URGENT] {t['symbol']} had no TP/SL; emergency close submitted.")
+                                elif okx_position_not_found_error(ec, em):
+                                    print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
+                                    close_orphan_trade_record(
+                                        t,
+                                        'missing_tp_sl_protection',
+                                        protection_status='failed',
+                                        protection_error='missing TP/SL protection',
                                     )
-                                    close_orphan_trade_record(t, 'exchange_position_missing')
+                                else:
+                                    t['protection_error'] = f"missing TP/SL; emergency close failed: code={ec} {em}"
+                                    print(f"[URGENT] {t['symbol']} emergency close failed: code={ec} {em}")
+                            except Exception as emergency_err:
+                                if okx_position_not_found_error(message=emergency_err):
+                                    print(f"[URGENT] {t['symbol']} emergency close exception indicates position already closed. Removing from active trades.")
+                                    close_orphan_trade_record(
+                                        t,
+                                        'missing_tp_sl_protection',
+                                        protection_status='failed',
+                                        protection_error='missing TP/SL protection',
+                                    )
                                     continue
-                                if close_size > 0:
-                                    try:
-                                        ccxt_sym = f"{normalize_symbol_key(t['symbol']).replace('USDT', '')}/USDT:USDT"
-                                        ok, ec, em = emergency_close_unprotected(ccxt_sym, t['direction'], close_size)
-                                        if ok:
-                                            t['emergency_close_submitted'] = True
-                                            t['protection_status'] = 'emergency_close_submitted'
-                                            print(f"[URGENT] {t['symbol']} had no SL for {missing_checks} checks; emergency close submitted.")
-                                        elif okx_position_not_found_error(ec, em):
-                                            print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
-                                            close_orphan_trade_record(t, 'emergency_position_not_found')
-                                        elif okx_position_not_found_error(ec, em):
-                                            # Position already closed on OKX side ??remove from active trades
-                                            print(f"[URGENT] {t['symbol']} emergency close 51169: position already closed. Removing from active trades.")
-                                            t['status'] = 'closed'
-                                            t['exit_reason'] = 'emergency_position_not_found'
-                                            t['emergency_close_submitted'] = True
-                                        else:
-                                            t['protection_error'] = f"missing SL; emergency close failed: code={ec} {em}"
-                                            print(f"[URGENT] {t['symbol']} emergency close failed: code={ec} {em}")
-                                    except Exception as emergency_err:
-                                        if okx_position_not_found_error(message=emergency_err):
-                                            print(f"[URGENT] {t['symbol']} emergency close exception indicates position already closed. Removing from active trades.")
-                                            close_orphan_trade_record(t, 'emergency_position_not_found')
-                                            continue
-                                        t['protection_error'] = f"missing SL; emergency close failed: {emergency_err}"
-                                        print(f"[URGENT] {t['symbol']} emergency close failed: {emergency_err}")
+                                t['protection_error'] = f"missing TP/SL; emergency close failed: {emergency_err}"
+                                print(f"[URGENT] {t['symbol']} emergency close failed: {emergency_err}")
+                            continue
                         
                         # Current price is already refreshed from the live position snapshot.
                         if not as_float(t.get('current')) and as_float(pos.get('markPrice')) > 0:

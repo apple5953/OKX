@@ -22,9 +22,12 @@ api_output.json
 *.bak
 *.bak-*
 *.corrupt-*
+*.bad-*
 *.pre-growth-repair.bak
+auth_token.json
 active_trades_*.json
 active_trades.json
+zero_start_state_*.json
 optimization_cycle_state.json
 analyze_journal.py
 check_bluai_market.py
@@ -39,3 +42,4 @@ test_tpsl.py
 verify_cleanup.py
 verify_cleanup.py
 scratch/
+state/

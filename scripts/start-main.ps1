@@ -54,13 +54,49 @@ if (-not $resolvedRunMode) {
 $env:OKX_NODE_NAME = $resolvedNodeName
 $env:NODE_NAME = $resolvedNodeName
 $env:OKX_RUN_MODE = $resolvedRunMode
+$strategyVersion = if ($env:OKX_STRATEGY_VERSION) { $env:OKX_STRATEGY_VERSION } else { 'v13' }
+$env:OKX_STRATEGY_VERSION = $strategyVersion
 
 $journalPath = Join-Path $RootDir ("journal_{0}.json" -f $resolvedNodeName)
 $tradePath = Join-Path $RootDir ("active_trades_{0}.json" -f $resolvedNodeName)
+$manifestPath = Join-Path $RootDir ("zero_start_state_{0}.json" -f $resolvedNodeName)
+
+function Test-ZeroStartBootstrapNeeded {
+    param(
+        [string]$ManifestPath,
+        [string]$ExpectedVersion
+    )
+
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        return $true
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    } catch {
+        return $true
+    }
+
+    if (-not $manifest.zero_start_mode) {
+        return $true
+    }
+
+    $savedVersion = [string]($manifest.strategy_version)
+    if ($savedVersion.Trim().ToLowerInvariant() -ne $ExpectedVersion.Trim().ToLowerInvariant()) {
+        return $true
+    }
+
+    return $false
+}
+
+if (Test-ZeroStartBootstrapNeeded -ManifestPath $manifestPath -ExpectedVersion $strategyVersion) {
+    Write-Host "[Info] Zero-start bootstrap required. Rebuilding clean V$strategyVersion state..."
+    & (Join-Path $RootDir "scripts\bootstrap-zero-start.ps1") -NodeName $resolvedNodeName -RunMode $resolvedRunMode
+    exit $LASTEXITCODE
+}
 
 Write-Host "[OK] Node Name: $resolvedNodeName"
 Write-Host "[OK] Run Mode: $resolvedRunMode"
 
 & (Join-Path $RootDir 'run_bot.bat') $resolvedRunMode
-
 

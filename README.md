@@ -36,7 +36,7 @@ The bot supports explicit run modes.
 
 | Mode | Purpose | Behavior |
 | --- | --- | --- |
-| `auto` | Default | Use live access when credentials and whitelist work, otherwise fall back to mock |
+| `auto` | Default | Try OKX access based on credentials and mode settings |
 | `mock` | Local simulation only | Never try to run as live; safe for secondary machines |
 | `demo` | OKX sandbox/demo | Connects to OKX demo trading, not local mock |
 | `live` | Primary machine | Use real OKX trading when credentials and whitelist work |
@@ -84,7 +84,7 @@ export OKX_API_SECRET=your_api_secret
 export OKX_PASSPHRASE=your_passphrase
 ```
 
-If a machine does not have valid credentials, it will fall back to mock mode unless you explicitly choose `demo` or `live`.
+If a machine does not have valid credentials, it should not be treated as a valid OKX demo machine until the credentials and permissions are fixed.
 
 ## What this repo does
 
@@ -123,7 +123,9 @@ You can also persist the name with:
 
 ## First launch: zero-start
 
-Use the bootstrap script the first time you start a machine.
+V13 uses a per-machine zero-start manifest. On the first launch, or whenever
+the manifest is missing or the strategy version changes, the launcher backs up
+old local history and rebuilds a clean empty journal before the bot starts.
 
 Windows:
 
@@ -165,6 +167,7 @@ What zero-start does:
 - backs up any existing `journal_<NODE_NAME>.json`
 - backs up any existing `active_trades_<NODE_NAME>.json`
 - backs up legacy `trade_journal.json` and `active_trades.json`
+- writes `zero_start_state_<NODE_NAME>.json` so the machine remembers it has been initialized
 - creates fresh empty `[]` files for the current machine
 - launches the bot unless `-SkipLaunch` / `SKIP_LAUNCH=1` is used
 
@@ -182,6 +185,10 @@ One-click main launcher:
 start-main.bat
 ```
 
+`run_bot.bat` and `start-main.bat` both re-check the zero-start manifest, so a
+brand new machine still starts from 0 even if you skip the explicit bootstrap
+step.
+
 macOS/Linux:
 
 ```bash
@@ -194,6 +201,8 @@ One-click main launcher:
 ./start-main.sh
 ```
 
+`run_bot.sh` and `start-main.sh` perform the same manifest check on Mac/Linux.
+
 The local UI opens automatically at `http://127.0.0.1:5000` unless you set `OKX_OPEN_UI=0`.
 
 ## Training flow
@@ -204,6 +213,16 @@ The local UI opens automatically at `http://127.0.0.1:5000` unless you set `OKX_
 4. GitHub Actions merges all `journal_*.json` files.
 5. `optimize_global.py` computes a fresh `global_optimizer.json`.
 6. Each node pulls the updated optimizer and continues with its own local journal.
+
+## Dashboard sync rules
+
+To keep the UI consistent, the dashboard now follows these source rules:
+
+1. Top summary, mode console, and health status prefer the live `/api/trades` report.
+2. Session history is only used as a fallback when the live report does not provide a value.
+3. Strategy cards prefer backend strategy stats first, then local session stats.
+4. The engine heartbeat panel prefers backend strategy stats so the cards and top summary stay aligned.
+5. Zero-start banners only show the current machine's local bootstrap state, not another machine's history.
 
 ## What each machine can do
 

@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title OKX V12 Harmonic Agent Portable Suite
+title OKX V13 Harmonic Agent Portable Suite
 
 set "RUN_MODE=%~1"
 if not "%RUN_MODE%"=="" (
@@ -8,7 +8,7 @@ if not "%RUN_MODE%"=="" (
 )
 
 echo ===================================================
-echo   OKX V12 Harmonic Agent - Portable Startup Script
+echo   OKX V13 Harmonic Agent - Portable Startup Script
 echo   Status: Pure Portable (No Install, No Admin Required)
 echo ===================================================
 echo.
@@ -67,6 +67,26 @@ del /f /q "%DEPS_DIR%\get-pip.py"
 echo [4/4] Installing robot libraries (CCXT, pandas, Flask, etc.)...
 "%PYTHON_EXE%" -m pip install --no-warn-script-location ccxt pandas flask
 
+for /f "usebackq delims=" %%I in (`"%PYTHON_EXE%" -c "from server_core import config; print(config.NODE_NAME)"`) do set "RESOLVED_NODE_NAME=%%I"
+for /f "usebackq delims=" %%I in (`"%PYTHON_EXE%" -c "from server_core import config; print(config.STRATEGY_VERSION)"`) do set "STRATEGY_VERSION=%%I"
+set "OKX_NODE_NAME=%RESOLVED_NODE_NAME%"
+set "NODE_NAME=%RESOLVED_NODE_NAME%"
+set "OKX_STRATEGY_VERSION=%STRATEGY_VERSION%"
+set "MANIFEST_PATH=%ROOT_DIR%zero_start_state_%RESOLVED_NODE_NAME%.json"
+
+if /I not "%OKX_ZERO_START_READY%"=="1" (
+    set "NEED_BOOTSTRAP=0"
+    for /f %%I in ('powershell -NoProfile -Command "$p = ''%MANIFEST_PATH%''; if (-not (Test-Path -LiteralPath $p)) { ''1'' } else { try { $m = Get-Content -LiteralPath $p -Raw ^| ConvertFrom-Json; if (($m.zero_start_mode -and ([string]$m.strategy_version).Trim().ToLowerInvariant() -eq ''%STRATEGY_VERSION%'') ) { ''0'' } else { ''1'' } } catch { ''1'' } }"') do set "NEED_BOOTSTRAP=%%I"
+    if "%NEED_BOOTSTRAP%"=="1" (
+        echo [Info] Zero-start bootstrap required for V%STRATEGY_VERSION%.
+        powershell -ExecutionPolicy Bypass -File "%ROOT_DIR%scripts\bootstrap-zero-start.ps1" -NodeName "%RESOLVED_NODE_NAME%" -RunMode "%OKX_RUN_MODE%" -SkipLaunch
+        if errorlevel 1 (
+            echo [Error] Zero-start bootstrap failed.
+            exit /b 1
+        )
+    )
+)
+
 echo.
 echo ===================================================
 echo [Success] Green Sandbox environment is now ready!
@@ -77,7 +97,7 @@ echo.
 if not "%OKX_RUN_MODE%"=="" (
     echo [Info] Run mode: %OKX_RUN_MODE%
 )
-echo [Info] Booting OKX V12 Harmonic Agent...
+echo [Info] Booting OKX V13 Harmonic Agent...
 if not "%OKX_OPEN_UI%"=="0" (
     echo [Info] UI will open at http://127.0.0.1:5000
     start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://127.0.0.1:5000'"

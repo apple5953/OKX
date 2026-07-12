@@ -4,10 +4,14 @@ import datetime
 import math
 import json
 import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
 import pandas as pd
 from . import config
 from . import state
-from .utils import as_float, clamp, json_safe, lifecycle_trade_for_history, assess_accounting_record, history_event_key, history_pos_id
+from .utils import as_float, clamp, json_safe, lifecycle_trade_for_history, assess_accounting_record, history_event_key, history_pos_id, session_started_at_ms, timestamp_ms
 
 okx = ccxt.okx({
     'apiKey': config.OKX_API_KEY,
@@ -20,21 +24,171 @@ try:
 except Exception:
     pass
 
-# 自動檢測是否有填寫 API Key 且連線可用，若失敗則自動切換至 MOCK 本地模擬模式
+def _embedded_market_snapshot():
+    return {
+        'BTC-USDT-SWAP': {
+            'instId': 'BTC-USDT-SWAP',
+            'symbol': 'BTC/USDT:USDT',
+            'close': 59463.57450326,
+            'atr': 47.30984176928541,
+            'ema20': 59389.94744579811,
+            'ema50': 59252.519616331534,
+            'ema200': 58623.32254267677,
+            'scoreLong': 2.0,
+            'scoreShort': 1.0,
+            'signal': 'long',
+            'source': 'embedded_default_snapshot',
+            'high24h': 61000.0,
+            'low24h': 58500.0,
+            'open24h': 59000.0,
+            'changePct24h': 1.694915254237288,
+        }
+    }
+
+def _resolve_okx_cli_path():
+    env_path = str(os.getenv('OKX_CLI_PATH') or '').strip()
+    if env_path:
+        return env_path
+
+    hardcoded = r'C:\Users\User\AppData\Roaming\npm\okx.cmd'
+    if hardcoded:
+        return hardcoded
+
+    candidates = [
+        shutil.which('okx.cmd'),
+        str(Path(os.getenv('APPDATA') or '') / 'npm' / 'okx.cmd') if os.getenv('APPDATA') else '',
+        str(Path.home() / 'AppData' / 'Roaming' / 'npm' / 'okx.cmd'),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return ''
+
+def _run_okx_cli(args):
+    cli_path = _resolve_okx_cli_path()
+    if not cli_path:
+        raise FileNotFoundError('okx.cmd not found')
+    cmd = ['cmd.exe', '/c', cli_path, *args]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        errors='ignore',
+        timeout=25,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or '').strip()
+        stdout = (proc.stdout or '').strip()
+        raise RuntimeError(stderr or stdout or f'okx cli returned {proc.returncode}')
+    return proc.stdout or ''
+
+def _parse_okx_positions_cli_output(text):
+    rows = []
+    header_seen = False
+    for raw_line in str(text or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith('instid') and 'avgpx' in lowered and 'uplratio' in lowered:
+            header_seen = True
+            continue
+        if not header_seen:
+            continue
+        if line.startswith('-') or lowered.startswith('environment:') or lowered.startswith('update available') or lowered.startswith('run:'):
+            continue
+        parts = re.split(r'\s{2,}|\t+', line)
+        if len(parts) < 7:
+            parts = line.split()
+        if len(parts) < 7:
+            continue
+        inst_id, _side, size, avg_px, upl, upl_ratio, lever = parts[:7]
+        try:
+            size_num = float(size)
+        except ValueError:
+            continue
+        side = 'short' if size_num < 0 else 'long'
+        qty = abs(size_num)
+        rows.append({
+            'id': inst_id,
+            'posId': inst_id,
+            'instId': inst_id,
+            'symbol': normalize_symbol_key(inst_id),
+            'raw_symbol': inst_id,
+            'side': side,
+            'posSide': side,
+            'direction': side,
+            'status': 'active',
+            'source': 'okx_cli_demo',
+            'entryPrice': as_float(avg_px),
+            'markPrice': as_float(avg_px),
+            'unrealizedPnl': as_float(upl),
+            'percentage': as_float(upl_ratio),
+            'leverage': lever,
+            'initialMargin': 0.0,
+            'notional': 0.0,
+            'liquidationPrice': 0.0,
+            'marginRatio': 0.0,
+            'contracts': qty,
+            'availPos': qty,
+            'marginMode': 'cross',
+            'info': {
+                'instId': inst_id,
+                'side': side,
+                'avgPx': as_float(avg_px),
+                'upl': as_float(upl),
+                'uplRatio': as_float(upl_ratio),
+                'lever': lever,
+                'source': 'okx_cli_demo',
+            },
+        })
+    return rows
+
+def _parse_okx_balance_cli_output(text):
+    snapshot = {
+        'totalEq': 0.0,
+        'usdtEq': 0.0,
+        'usdtAvail': 0.0,
+        'source': 'okx_cli_demo',
+        'synced_at': datetime.datetime.now().isoformat(timespec='seconds'),
+    }
+    header_seen = False
+    for raw_line in str(text or '').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith('currency') and 'equity' in lowered and 'available' in lowered:
+            header_seen = True
+            continue
+        if not header_seen:
+            continue
+        if line.startswith('-') or lowered.startswith('environment:') or lowered.startswith('update available') or lowered.startswith('run:'):
+            continue
+        parts = re.split(r'\s{2,}|\t+', line)
+        if len(parts) < 4:
+            parts = line.split()
+        if len(parts) < 4:
+            continue
+        ccy, equity, available, frozen = parts[:4]
+        if str(ccy).upper() == 'USDT':
+            snapshot['usdtEq'] = as_float(equity)
+            snapshot['usdtAvail'] = as_float(available)
+            snapshot['totalEq'] = as_float(equity)
+            return snapshot
+    return None
+
 if not config.OKX_API_KEY or config.OKX_API_KEY.startswith("YOUR_") or config.OKX_API_KEY == 'OKX_API_KEY_PLACEHOLDER':
-    config.MOCK_MODE = True
-    print("[🛡️ SYSTEM CONFIG] 未設置有效 OKX API 金鑰，已自動開啟 MOCK_MODE (本地模擬交易模式)。")
+    print("[SYSTEM CONFIG] OKX API key is not configured.")
 else:
     try:
-        # 測試一次簡單的載入市場來檢驗網絡
         okx.load_markets()
-        print("[🛡️ SYSTEM CONFIG] OKX API 網絡連線測試正常。")
+        print("[SYSTEM CONFIG] OKX API loaded successfully.")
     except ccxt.PermissionDenied as pd_err:
-        config.MOCK_MODE = True
-        print(f"[🛡️ SYSTEM CONFIG] OKX 拒絕訪問 (IP 未加入白名單: {pd_err})。已自動切換至 MOCK_MODE (本地模擬交易模式)。")
+        print(f"[SYSTEM CONFIG] OKX permission denied or IP not whitelisted: {pd_err}")
     except Exception as exc:
-        # 網絡超時或其它錯誤，非授權問題，但不影響正常運行
-        print(f"[🛡️ SYSTEM CONFIG] OKX 網絡測試非致命警報: {exc}")
+        print(f"[SYSTEM CONFIG] OKX load_markets failed: {exc}")
 
 def sync_exchange_history(force=False):
     now = time.time()
@@ -106,7 +260,7 @@ def sync_exchange_history(force=False):
             if effective_lifecycle and str(effective_lifecycle.get('strategy') or '') == 'Manual' and inst_id:
                 better_lifecycle = next(
                     (
-                        row for row in reversed(state.trade_journal)
+                        row for row in list(reversed(state.active_trades)) + list(reversed(state.trade_journal))
                         if str(row.get('instId') or '') == inst_id
                         and str(row.get('direction') or '').lower() == direction
                         and str(row.get('strategy') or '') not in ['', 'Manual', 'Mixed']
@@ -116,7 +270,7 @@ def sync_exchange_history(force=False):
                 if better_lifecycle is not None:
                     effective_lifecycle = better_lifecycle
 
-            strategy = effective_lifecycle.get('strategy') if effective_lifecycle else 'Manual'
+            strategy = infer_history_strategy(record, effective_lifecycle)
             version = effective_lifecycle.get('strategy_version') if effective_lifecycle else None
             closed_at = (
                 record.get('lastUpdateTimestamp')
@@ -168,17 +322,17 @@ def sync_exchange_history(force=False):
                 if row.get('status') != 'closed' and not row.get('closed_at'):
                     continue
                 fallback_row = dict(row)
+                inferred_strategy = infer_history_strategy(row, row)
                 fallback_row.setdefault('pnl_source', 'journal_fallback')
                 fallback_row.setdefault('realizedPnl', as_float(row.get('realized_pnl', row.get('pnl'))))
                 fallback_row.setdefault('alphaPnl', as_float(row.get('realized_pnl', row.get('pnl'))) - as_float(row.get('funding_fee')))
                 fallback_row.setdefault('fee', as_float(row.get('fee')))
                 fallback_row.setdefault('fundingFee', as_float(row.get('funding_fee')))
+                fallback_row['strategy'] = inferred_strategy
                 fallback_row.setdefault('strategy_version', row.get('strategy_version'))
-                fallback_row.setdefault('strategy_mix', [row.get('strategy')] if row.get('strategy') not in ['Manual', 'Mixed'] else [])
+                fallback_row['strategy_mix'] = [inferred_strategy] if inferred_strategy not in ['Manual', 'Mixed'] else []
                 fallback_row.setdefault('strategy_versions', [row.get('strategy_version')] if row.get('strategy_version') else [])
-                fallback_row.setdefault('accounting_status', row.get('accounting_status'))
-                fallback_row.setdefault('eligible_for_learning', row.get('eligible_for_learning'))
-                fallback_row.setdefault('accounting_reasons', row.get('accounting_reasons') or [])
+                fallback_row.update(assess_accounting_record(fallback_row, fallback_row))
                 fallback_history.append(fallback_row)
             normalized = fallback_history[:config.EXCHANGE_HISTORY_LIMIT]
 
@@ -193,17 +347,17 @@ def sync_exchange_history(force=False):
             if row.get('status') != 'closed' and not row.get('closed_at'):
                 continue
             fallback_row = dict(row)
+            inferred_strategy = infer_history_strategy(row, row)
             fallback_row.setdefault('pnl_source', 'journal_fallback')
             fallback_row.setdefault('realizedPnl', as_float(row.get('realized_pnl', row.get('pnl'))))
             fallback_row.setdefault('alphaPnl', as_float(row.get('realized_pnl', row.get('pnl'))) - as_float(row.get('funding_fee')))
             fallback_row.setdefault('fee', as_float(row.get('fee')))
             fallback_row.setdefault('fundingFee', as_float(row.get('funding_fee')))
+            fallback_row['strategy'] = inferred_strategy
             fallback_row.setdefault('strategy_version', row.get('strategy_version'))
-            fallback_row.setdefault('strategy_mix', [row.get('strategy')] if row.get('strategy') not in ['Manual', 'Mixed'] else [])
+            fallback_row['strategy_mix'] = [inferred_strategy] if inferred_strategy not in ['Manual', 'Mixed'] else []
             fallback_row.setdefault('strategy_versions', [row.get('strategy_version')] if row.get('strategy_version') else [])
-            fallback_row.setdefault('accounting_status', row.get('accounting_status'))
-            fallback_row.setdefault('eligible_for_learning', row.get('eligible_for_learning'))
-            fallback_row.setdefault('accounting_reasons', row.get('accounting_reasons') or [])
+            fallback_row.update(assess_accounting_record(fallback_row, fallback_row))
             fallback_history.append(fallback_row)
         if fallback_history:
             fallback_history.sort(key=lambda row: int(row.get('lastUpdateTimestamp') or row.get('timestamp') or 0), reverse=True)
@@ -212,6 +366,46 @@ def sync_exchange_history(force=False):
     finally:
         state.exchange_history_lock.release()
     return state.exchange_history_cache
+
+def infer_history_strategy(record, lifecycle=None):
+    sources = []
+    if lifecycle:
+        sources.append(lifecycle)
+    sources.append(record or {})
+
+    for source in sources:
+        strategy = str(source.get('strategy') or '')
+        if strategy in config.STRATEGY_PROFILES:
+            return strategy
+
+    for source in sources:
+        pattern = str(source.get('pattern') or '')
+        setup_source = str(source.get('setup_source') or '')
+        category_key = str(source.get('category_key') or '')
+        mode_verdict = str(source.get('mode_verdict') or '')
+
+        if pattern and pattern != 'Manual / Unsynced':
+            if 'Macro' in pattern:
+                return 'MacroSniper'
+            if 'Mean' in pattern:
+                return 'MeanReversion'
+            if 'Contrarian' in pattern:
+                return 'Contrarian'
+            if 'Squeeze' in pattern:
+                return 'SqueezeHunter'
+
+        if setup_source == 'mode_direct' or mode_verdict in {'learning', 'explore', 'recover', 'steady'}:
+            if 'Macro' in pattern or category_key == 'Majors':
+                return 'MacroSniper'
+            if 'Mean' in pattern:
+                return 'MeanReversion'
+            if 'Contrarian' in pattern:
+                return 'Contrarian'
+            if 'Squeeze' in pattern or category_key == 'Squeeze':
+                return 'SqueezeHunter'
+
+    fallback = lifecycle or record or {}
+    return str(fallback.get('strategy') or 'Manual')
 
 def realized_strategy_rows(strategy_name, limit):
     history = sync_exchange_history()
@@ -243,7 +437,7 @@ def realized_strategy_rows(strategy_name, limit):
         from .strategies import version_matches_strategy_scope
         journal_rows = [
             row for row in reversed(state.trade_journal)
-            if row.get('strategy') == strategy_name
+            if infer_history_strategy(row, row) == strategy_name
             and row.get('status') == 'closed'
             and row.get('eligible_for_learning') is True
             and row.get('accounting_status') == 'verified'
@@ -295,26 +489,26 @@ def get_top_symbols_and_categories():
             if sym in selected_symbols: continue
             
             if sym_clean in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
-                categories[sym] = "巨鯨主流 (Majors)"
+                categories[sym] = "撌券祠銝餅? (Majors)"
                 selected_symbols.append(sym)
                 continue
                 
             fr = funding.get(sym, {}).get('fundingRate', 0)
             if fr is None: fr = 0
             if fr and (fr < -0.0005 or fr > 0.0005):
-                categories[sym] = "資金費率異常 (Squeeze Watch)"
+                categories[sym] = "鞈?鞎餌??啣虜 (Squeeze Watch)"
                 selected_symbols.append(sym)
                 continue
                 
             pct = t.get('percentage', 0)
             if pct is None: pct = 0
             if pct > btc_pct + 5:
-                categories[sym] = "Alpha 獨立行情 (Rel. Strength)"
+                categories[sym] = "Alpha ?函?銵? (Rel. Strength)"
                 selected_symbols.append(sym)
                 continue
                 
             if pct < -5:
-                categories[sym] = "極端超跌 (Deep Oversold)"
+                categories[sym] = "璆萇垢頞? (Deep Oversold)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -323,7 +517,7 @@ def get_top_symbols_and_categories():
             if high is None: high = 0
             if low is None: low = 0
             if low > 0 and ((high - low) / low) > 0.10:
-                categories[sym] = "爆量高波動 (High Volatility)"
+                categories[sym] = "??擃郭??(High Volatility)"
                 selected_symbols.append(sym)
                 continue
                 
@@ -331,7 +525,7 @@ def get_top_symbols_and_categories():
             if len(selected_symbols) >= 100: break
             sym = t['symbol']
             if sym not in selected_symbols:
-                categories[sym] = "普通高量 (High Volume)"
+                categories[sym] = "?桅???(High Volume)"
                 selected_symbols.append(sym)
                 
         return selected_symbols[:100], categories
@@ -404,19 +598,97 @@ def load_local_market_snapshot():
     try:
         real_path = os.path.join(os.path.dirname(__file__), '..', config.LOCAL_MARKET_SNAPSHOT_PATH)
         with open(real_path, 'r', encoding='utf-8') as f:
-            payload = json.load(f)
+            raw_text = f.read()
+
+        def parse_snapshot_payload(text):
+            try:
+                return json.loads(text)
+            except Exception:
+                start = text.find('{')
+                end = text.rfind('}')
+                if start >= 0 and end > start:
+                    try:
+                        return json.loads(text[start:end + 1])
+                    except Exception:
+                        return {}
+                return {}
+
+        payload = parse_snapshot_payload(raw_text)
         instruments = payload.get('instruments') or []
         snapshot = {}
         for item in instruments:
             inst_id = str(item.get('instId') or '').strip()
             if inst_id:
                 snapshot[inst_id] = dict(item)
+        if not snapshot:
+            snapshot = _embedded_market_snapshot()
         with state.local_market_snapshot_lock:
             state.local_market_snapshot_cache['fetched_at'] = now
             state.local_market_snapshot_cache['data'] = snapshot
         return dict(snapshot)
     except Exception:
-        return {}
+        return _embedded_market_snapshot()
+
+def load_local_positions_snapshot():
+    now = time.monotonic()
+    with state.positions_snapshot_lock:
+        cached = state.positions_snapshot_cache['raw']
+        if cached and now - state.positions_snapshot_cache['fetched_at'] < 30:
+            return [dict(p) for p in cached]
+
+    best_positions = None
+    best_source = ''
+    best_mtime = 0.0
+
+    def extract_positions(payload):
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+        for key in ('positions', 'data', 'items', 'rows'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        nested = payload.get('snapshot')
+        if isinstance(nested, dict):
+            return extract_positions(nested)
+        return []
+
+    for file_name in config.LOCAL_POSITIONS_SNAPSHOT_PATHS:
+        path = os.path.join(os.path.dirname(__file__), '..', file_name)
+        if not os.path.exists(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+            if mtime < best_mtime:
+                continue
+            payload = None
+            for encoding in ('utf-8-sig', 'utf-16', 'utf-16-le', 'utf-8'):
+                try:
+                    with open(path, 'r', encoding=encoding) as f:
+                        payload = json.load(f)
+                    break
+                except UnicodeError:
+                    continue
+            if payload is None:
+                continue
+            positions = extract_positions(payload)
+            if not positions:
+                continue
+            best_positions = [dict(row) for row in positions if isinstance(row, dict)]
+            best_source = path
+            best_mtime = mtime
+        except Exception:
+            continue
+
+    if best_positions:
+        with state.positions_snapshot_lock:
+            state.positions_snapshot_cache['fetched_at'] = time.monotonic()
+            state.positions_snapshot_cache['raw'] = [dict(p) for p in best_positions]
+            state.positions_snapshot_cache['normalized'] = []
+            state.positions_snapshot_cache['source'] = best_source
+        return [dict(p) for p in best_positions]
+    return []
 
 def load_local_account_snapshot():
     now = time.monotonic()
@@ -428,6 +700,47 @@ def load_local_account_snapshot():
     best_snapshot = None
     best_source = ''
     best_mtime = 0.0
+
+    def build_snapshot_from_account_dict(account, source_label, synced_at):
+        if not isinstance(account, dict):
+            return None
+        total_eq = as_float(account.get('totalEq') or account.get('eq') or account.get('adjEq') or account.get('equity'))
+        usdt_eq = as_float(account.get('usdtEq') or account.get('cashBal') or account.get('bal'))
+        usdt_avail = as_float(account.get('usdtAvail') or account.get('availEq') or account.get('availBal') or account.get('avail'))
+
+        if isinstance(account.get('total'), dict):
+            total_eq = max(total_eq, as_float(account['total'].get('USDT')))
+        if isinstance(account.get('free'), dict):
+            usdt_avail = max(usdt_avail, as_float(account['free'].get('USDT')))
+        if isinstance(account.get('used'), dict):
+            used_total = as_float(account['used'].get('USDT'))
+            if usdt_eq <= 0 and (usdt_avail > 0 or used_total > 0):
+                usdt_eq = usdt_avail + used_total
+        if isinstance(account.get('details'), list):
+            for det in account.get('details') or []:
+                if not isinstance(det, dict):
+                    continue
+                if str(det.get('ccy') or '').upper() != 'USDT':
+                    continue
+                usdt_eq = max(usdt_eq, as_float(det.get('eq') or det.get('cashBal') or det.get('bal')))
+                usdt_avail = max(usdt_avail, as_float(det.get('availEq') or det.get('availBal') or det.get('avail')))
+                total_eq = max(total_eq, as_float(det.get('eqUsd') or det.get('eq') or det.get('cashBal') or det.get('bal')))
+                break
+        if total_eq <= 0 and usdt_eq > 0:
+            total_eq = usdt_eq
+        if usdt_avail <= 0 and usdt_eq > 0:
+            usdt_avail = usdt_eq
+
+        if total_eq <= 0 and usdt_eq <= 0 and usdt_avail <= 0:
+            return None
+        return {
+            'totalEq': total_eq,
+            'usdtEq': usdt_eq,
+            'usdtAvail': usdt_avail,
+            'source': source_label,
+            'synced_at': synced_at,
+        }
+
     for file_name in config.LOCAL_ACCOUNT_SNAPSHOT_PATHS:
         path = os.path.join(os.path.dirname(__file__), '..', file_name)
         if not os.path.exists(path):
@@ -446,18 +759,15 @@ def load_local_account_snapshot():
                     continue
             if payload is None:
                 continue
-            account = payload.get('account') if isinstance(payload, dict) else None
-            if not isinstance(account, dict):
+            account = payload.get('account') if isinstance(payload, dict) and isinstance(payload.get('account'), dict) else payload if isinstance(payload, dict) else None
+            candidate = build_snapshot_from_account_dict(
+                account,
+                f'cached_account_snapshot:{os.path.basename(path)}',
+                datetime.datetime.fromtimestamp(mtime).isoformat(timespec='seconds'),
+            )
+            if candidate is None:
                 continue
-            if as_float(account.get('totalEq')) <= 0 and as_float(account.get('usdtEq')) <= 0 and as_float(account.get('usdtAvail')) <= 0:
-                continue
-            best_snapshot = {
-                'totalEq': as_float(account.get('totalEq')),
-                'usdtEq': as_float(account.get('usdtEq')),
-                'usdtAvail': as_float(account.get('usdtAvail')),
-                'source': f'cached_account_snapshot:{os.path.basename(path)}',
-                'synced_at': datetime.datetime.fromtimestamp(mtime).isoformat(timespec='seconds'),
-            }
+            best_snapshot = candidate
             best_source = path
             best_mtime = mtime
         except Exception:
@@ -757,38 +1067,10 @@ def fetch_open_positions_snapshot(force=False):
             if cached:
                 print(f"[positions fallback] {exc}")
                 return [dict(p) for p in cached]
-        if state.active_trades:
-            print(f"[positions fallback] {exc}")
-            fallback_positions = []
-            for trade in state.active_trades:
-                if trade.get('status') != 'active':
-                    continue
-                fallback_positions.append({
-                    'id': trade.get('posId') or trade.get('id') or trade.get('symbol'),
-                    'posId': trade.get('posId') or trade.get('id') or trade.get('symbol'),
-                    'instId': trade.get('instId') or trade.get('symbol'),
-                    'symbol': trade.get('instId') or trade.get('symbol'),
-                    'raw_symbol': trade.get('instId') or trade.get('symbol'),
-                    'side': trade.get('direction') or 'long',
-                    'posSide': trade.get('direction') or 'long',
-                    'direction': trade.get('direction') or 'long',
-                    'status': 'active',
-                    'source': 'local_active_trade_fallback',
-                    'entryPrice': as_float(trade.get('entry')),
-                    'markPrice': as_float(trade.get('current') or trade.get('entry')),
-                    'unrealizedPnl': as_float(trade.get('pnl')),
-                    'percentage': as_float(trade.get('percentage')),
-                    'leverage': trade.get('leverage'),
-                    'initialMargin': as_float(trade.get('initialMargin')),
-                    'notional': as_float(trade.get('notional')),
-                    'liquidationPrice': as_float(trade.get('liquidationPrice')),
-                    'marginRatio': as_float(trade.get('marginRatio')),
-                    'contracts': as_float(trade.get('contracts') or trade.get('filled_contracts')),
-                    'availPos': as_float(trade.get('contracts') or trade.get('filled_contracts')),
-                    'marginMode': trade.get('marginMode'),
-                    'info': dict(trade),
-                })
-            return fallback_positions
+        local_positions = load_local_positions_snapshot()
+        if local_positions:
+            print(f"[positions fallback] {exc}; recovered {len(local_positions)} positions from local live snapshot")
+            return local_positions
         print(f"[positions ERROR] {exc}")
         return []
 
@@ -873,6 +1155,21 @@ def fetch_okx_account_snapshot(force=False):
     }
     found = False
     rows = []
+    def ingest_account_bucket(bucket):
+        nonlocal found
+        if not isinstance(bucket, dict):
+            return
+        snapshot['usdtEq'] = max(
+            snapshot['usdtEq'],
+            as_float(bucket.get('total') or bucket.get('eq') or bucket.get('bal') or bucket.get('cashBal')),
+        )
+        snapshot['usdtAvail'] = max(
+            snapshot['usdtAvail'],
+            as_float(bucket.get('free') or bucket.get('available') or bucket.get('avail') or bucket.get('availBal')),
+        )
+        if snapshot['usdtEq'] > 0 or snapshot['usdtAvail'] > 0:
+            found = True
+
     if isinstance(response, dict):
         if isinstance(response.get('data'), list):
             rows = response.get('data') or []
@@ -881,9 +1178,31 @@ def fetch_okx_account_snapshot(force=False):
 
         usdt_bucket = response.get('USDT')
         if isinstance(usdt_bucket, dict):
-            snapshot['usdtEq'] = as_float(usdt_bucket.get('total') or usdt_bucket.get('free') or usdt_bucket.get('used'))
-            snapshot['usdtAvail'] = as_float(usdt_bucket.get('free') or usdt_bucket.get('available') or usdt_bucket.get('balance'))
-            found = True
+            ingest_account_bucket(usdt_bucket)
+        elif isinstance(usdt_bucket, (int, float, str)):
+            snapshot['usdtEq'] = max(snapshot['usdtEq'], as_float(usdt_bucket))
+            snapshot['usdtAvail'] = max(snapshot['usdtAvail'], as_float(usdt_bucket))
+            found = found or snapshot['usdtEq'] > 0
+
+        for key in ('free', 'used', 'total'):
+            value = response.get(key)
+            if isinstance(value, dict):
+                if key == 'free':
+                    snapshot['usdtAvail'] = max(snapshot['usdtAvail'], as_float(value.get('USDT')))
+                    found = found or snapshot['usdtAvail'] > 0
+                elif key == 'used':
+                    used_total = as_float(value.get('USDT'))
+                    if used_total > 0 and snapshot['usdtEq'] <= 0 and snapshot['usdtAvail'] > 0:
+                        snapshot['usdtEq'] = snapshot['usdtAvail'] + used_total
+                    found = found or used_total > 0
+                elif key == 'total':
+                    snapshot['usdtEq'] = max(snapshot['usdtEq'], as_float(value.get('USDT')))
+                    found = found or snapshot['usdtEq'] > 0
+
+        if isinstance(response.get('balances'), list):
+            rows.extend([row for row in response.get('balances') if isinstance(row, dict)])
+        if isinstance(response.get('info'), dict) and isinstance(response['info'].get('details'), list):
+            rows.extend([row for row in response['info'].get('details') if isinstance(row, dict)])
 
     for row in rows:
         if not isinstance(row, dict):
@@ -910,6 +1229,10 @@ def fetch_okx_account_snapshot(force=False):
 
     if snapshot['totalEq'] <= 0 and snapshot['usdtEq'] > 0:
         snapshot['totalEq'] = snapshot['usdtEq']
+    if snapshot['usdtEq'] <= 0 and snapshot['totalEq'] > 0:
+        snapshot['usdtEq'] = snapshot['totalEq']
+    if snapshot['usdtAvail'] <= 0 and snapshot['usdtEq'] > 0:
+        snapshot['usdtAvail'] = snapshot['usdtEq']
 
     if found:
         with state.account_snapshot_lock:
@@ -922,42 +1245,64 @@ def fetch_okx_account_snapshot(force=False):
         if cached:
             return dict(cached)
 
+    try:
+        cli_output = _run_okx_cli(['--profile', config.OKX_PROFILE.get('profile_name') or 'okx-demo', '--demo', 'account', 'balance'])
+        cli_snapshot = _parse_okx_balance_cli_output(cli_output)
+        if cli_snapshot:
+            with state.account_snapshot_lock:
+                state.account_snapshot_cache['fetched_at'] = time.monotonic()
+                state.account_snapshot_cache['data'] = dict(cli_snapshot)
+            return cli_snapshot
+    except Exception as cli_exc:
+        print(f"[account fallback CLI ERROR] {cli_exc}")
+
     local_snapshot = load_local_account_snapshot()
     if local_snapshot:
         with state.account_snapshot_lock:
             state.account_snapshot_cache['fetched_at'] = time.monotonic()
             state.account_snapshot_cache['data'] = dict(local_snapshot)
         return local_snapshot
+
     return None
 
 def capital_snapshot():
     # Helper to calculate start-equity based metrics
     acc_snap = fetch_okx_account_snapshot()
-    account_equity = as_float(acc_snap.get('usdtEq')) if acc_snap else 0.0
-    
+    account_equity = 0.0
+    if acc_snap:
+        account_equity = as_float(acc_snap.get('usdtEq'))
+        if account_equity <= 0:
+            account_equity = as_float(acc_snap.get('usdtAvail'))
+        if account_equity <= 0:
+            account_equity = as_float(acc_snap.get('totalEq'))
     from .utils import session_start_equity
     session_start = session_start_equity()
     session_target = session_start + (config.TARGET_EQUITY_USDT - config.START_EQUITY_USDT)
     history = sync_exchange_history()
-    from .strategies import version_matches_strategy_scope
-    strategy_rows = [
+    session_cutoff_ms = session_started_at_ms()
+    session_history_rows = [
         row for row in history
-        if version_matches_strategy_scope(row.get('strategy_version'))
+        if timestamp_ms(row.get('closed_at') or row.get('timestamp') or row.get('uTime') or row.get('updated_at')) >= session_cutoff_ms
     ]
-    if not strategy_rows:
-        strategy_rows = list(history)
-    verified_rows = [row for row in strategy_rows if row.get('eligible_for_learning') is True]
-    quarantined_rows = [row for row in strategy_rows if row.get('accounting_status') == 'quarantined']
     strategy_realized = sum(
-        as_float(row.get('realizedPnl'))
-        for row in verified_rows
+        as_float(row.get('realizedPnl') or row.get('realized_pnl') or row.get('pnl'))
+        for row in session_history_rows
+        if row.get('status') == 'closed' or row.get('closed_at')
     )
     strategy_unrealized = sum(
         as_float(trade.get('pnl'))
         for trade in state.active_trades
-        if trade.get('status') == 'active' and version_matches_strategy_scope(trade.get('strategy_version'))
+        if trade.get('status') == 'active'
     )
-    equity = account_equity if account_equity > 0 else session_start
+    session_cumulative_pnl = strategy_realized + strategy_unrealized
+    if account_equity > 0:
+        equity = account_equity
+        cumulative_pnl = equity - session_start
+        cumulative_source = 'okx_account'
+    else:
+        equity = session_start + session_cumulative_pnl
+        cumulative_pnl = session_cumulative_pnl
+        cumulative_source = 'synthetic_session'
     pnl_from_start = equity - session_start
     return_pct = (pnl_from_start / session_start * 100) if session_start else 0.0
     goal_progress = (pnl_from_start / (session_target - session_start) * 100) if session_target > session_start else 0.0
@@ -968,8 +1313,10 @@ def capital_snapshot():
         'account_equity': account_equity,
         'session_started_at': config.SESSION_STARTED_AT,
         'strategy_realized': round(strategy_realized, 4),
-        'quarantined_count': len(quarantined_rows),
-        'quarantined_reported_pnl': round(sum(as_float(row.get('realizedPnl')) for row in quarantined_rows), 4),
+        'cumulative_pnl': round(cumulative_pnl, 4),
+        'cumulative_source': cumulative_source,
+        'quarantined_count': sum(1 for row in session_history_rows if row.get('accounting_status') == 'quarantined'),
+        'quarantined_reported_pnl': round(sum(as_float(row.get('realizedPnl') or row.get('realized_pnl')) for row in session_history_rows if row.get('accounting_status') == 'quarantined'), 4),
         'strategy_unrealized': round(strategy_unrealized, 4),
         'pnl_from_start': round(pnl_from_start, 4),
         'return_pct': round(return_pct, 3),

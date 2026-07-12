@@ -11,10 +11,13 @@ let sessionOptimizerData = {};
 let sessionReportData = { live_modes: [], weak_modes: [] };
 let accountData = {};
 let reportData = {};
+let healthCheckData = {};
 let runtimeStatus = {};
 let currentStrategyFilter = 'All';
 let latestRegime = 'ranging';
-let currentStrategyVersion = 'v9';
+let currentStrategyVersion = 'v13';
+let dashboardSnapshotAt = '';
+let dashboardCapital = {};
 
 const START_EQUITY = 5000;
 const TARGET_EQUITY = 10000;
@@ -101,6 +104,19 @@ function escapeHtml(value) {
 }
 
 const labelMap = [
+    ['Monitoring active positions.', '監控實際持倉中。'],
+    ['Protect at 0.25R, tighten near 0.55R, 移動止盈 winners, and keep orphan close orders under watch.', '先在 0.25R 保護，接近 0.55R 後收緊；贏家單採用移動止盈，並持續監看殘留的平倉單。'],
+    ['Protect at 0.25R', '在 0.25R 時保護'],
+    ['tighten near 0.55R', '接近 0.55R 時收緊'],
+    ['keep orphan close orders under watch', '持續監看殘留的平倉單'],
+    ['check required', '需要檢查'],
+    ['winners', '贏家單'],
+    [' and ', ' 與 '],
+    ['移動止盈 贏家單, and 持續監看殘留的平倉單.', '移動止盈贏家單，並持續監看殘留的平倉單。'],
+    ['Scanning', '掃描中'],
+    ['scan', '掃描'],
+    ['okx_account_balance', 'OKX 帳戶餘額'],
+    ['okx_live_snapshot', 'OKX 即時快照'],
     ['protection_failed', '\u4fdd\u8b77\u55ae\u5931\u6557'],
     ['mfe_runner_lock', 'MFE \u5954\u8dd1\u9396\u5229'],
     ['mfe_profit_lock', 'MFE \u6d6e\u76c8\u9396\u5229'],
@@ -145,9 +161,11 @@ function zhReason(value) {
             .replace('and profit room >=', '\uff0c\u5229\u6f64\u7a7a\u9593 >=');
     }
     const item = reasonMap.find(([key]) => raw.includes(key));
-    return item ? item[1] : zhText(raw)
+    const normalized = item ? item[1] : zhText(raw)
         .replace('margin', '\u4fdd\u8b49\u91d1')
         .replace('at', '\u69d3\u687f');
+    if (/[?銝]/.test(normalized)) return '掃描中';
+    return normalized;
 }
 
 function zhText(value) {
@@ -280,6 +298,44 @@ function runtimeLabel(mode) {
 function optimizerLine(opt) {
     if (!opt) return '\u81ea\u52d5\u8abf\u53c3\u5c1a\u672a\u540c\u6b65';
     return `\u81ea\u52d5\u8abf\u53c3: ${optimizerLabel(opt)} / \u9032\u5834x${num(opt.tolerance_mult, 2)} / RRx${num(opt.target_rr_mult, 2)} / \u51b7\u537bx${num(opt.cooldown_mult, 2)}`;
+}
+
+function modeTierLabel(tier) {
+    if (tier === 'live_core') return '核心實戰';
+    if (tier === 'live_calibration') return '校準實戰';
+    return '觀察中';
+}
+
+function getUnifiedReportModes() {
+    const liveModes = Array.isArray(reportData?.live_modes) && reportData.live_modes.length
+        ? reportData.live_modes
+        : (Array.isArray(sessionReportData?.live_modes) ? sessionReportData.live_modes : []);
+    const weakModes = Array.isArray(reportData?.weak_modes) && reportData.weak_modes.length
+        ? reportData.weak_modes
+        : (Array.isArray(sessionReportData?.weak_modes) ? sessionReportData.weak_modes : []);
+    return { liveModes, weakModes };
+}
+
+function getUnifiedReportMetrics() {
+    const capital = accountData.capital || {};
+    const activeTrades = currentTrades.filter((trade) => trade.status === 'active');
+    const potentialTrades = currentTrades.filter((trade) => trade.status === 'potential');
+    const report = reportData && typeof reportData === 'object' ? reportData : {};
+    return {
+        activeCount: Number(report.active_count ?? activeTrades.length ?? 0),
+        potentialCount: Number(report.potential_count ?? potentialTrades.length ?? 0),
+        activePnl: Number(report.active_pnl ?? activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)),
+        sessionActiveCount: Number(report.session_active_count ?? 0),
+        sessionPotentialCount: Number(report.session_potential_count ?? 0),
+        sessionActivePnl: Number(report.session_active_pnl ?? 0),
+        sessionRealizedPnl: Number(report.session_realized_pnl ?? 0),
+        verdict: report.verdict || '掃描中',
+        protectionRule: report.protection_rule || '-',
+        serverTime: report.server_time || '-',
+        positions: Array.isArray(report.positions) ? report.positions : [],
+        trackedPositions: Array.isArray(report.tracked_positions) ? report.tracked_positions : [],
+        capital,
+    };
 }
 
 function renderRuntimeStatus() {
@@ -635,84 +691,21 @@ function updateProgressCurve(pnlVal, signedProgress) {
     document.getElementById('progress-dot').setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
     
     const match = currentStrategyVersion.match(/v\d+/i);
-    const verTag = match ? match[0].toUpperCase() : 'V9';
+    const verTag = match ? match[0].toUpperCase() : 'V13';
     const pnlText = `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)} USDT`;
     const pctText = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
 
-    document.getElementById('curve-label').textContent = `${verTag} 淨損益: ${pnlText} (${pctText})`;
+    document.getElementById('curve-label').textContent = `${verTag} 累積盈虧 ${pnlText} (${pctText})`;
     document.getElementById('curve-label').setAttribute('x', Math.max(60, Math.min(520, x - 28)));
     document.getElementById('curve-label').setAttribute('y', isDrawdown ? 174 : 28);
-}
-
-function updateOverview() {
-    const activePnl = currentTrades
-        .filter((trade) => trade.status === 'active')
-        .reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
-    const equity = Number(accountData.usdtEq || accountData.usdtAvail || 0);
-    const pnlEl = document.getElementById('total-profit');
-    pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
-    pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
-    document.getElementById('total-equity').textContent = money(equity);
-    document.getElementById('usdt-avail').textContent = money(accountData.usdtAvail);
-    
-    const strategyTotalPnl = Object.values(performanceData || {}).reduce((sum, p) => sum + Number(p.total_pnl || 0), 0);
-    const capitalChange = strategyTotalPnl;
-    const capitalChangeEl = document.getElementById('capital-change');
-    capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
-    capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
-    
-    const targetProfitGoal = TARGET_EQUITY - START_EQUITY; // 5000
-    const signedProgress = (strategyTotalPnl / targetProfitGoal) * 100;
-    updateProgressCurve(strategyTotalPnl, signedProgress);
-
-    const match = currentStrategyVersion.match(/v\d+/i);
-    const verTag = match ? match[0].toUpperCase() : 'V9';
-
-    const perfList = Object.values(sessionPerformanceData || {});
-    const paused = perfList.filter((item) => item.verdict === 'pause').length;
-    const active = currentTrades.filter((item) => item.status === 'active').length;
-    document.getElementById('bot-verdict').textContent = (accountData.capital || {}).state === 'drawdown'
-        ? `${verTag} 策略回撤中（仍持續掃描）`
-        : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
-    document.getElementById('operator-summary').innerHTML = `
-        <div><span>${active}</span><strong>筆持倉</strong></div>
-        <div><span>${paused}</span><strong>個模式目前屬於弱勢訓練</strong></div>
-        <div><span>${money(activePnl)}</span><strong>\u76ee\u524d\u6d6e\u52d5\u640d\u76ca</strong></div>
-    `;
-}
-
-function renderBotReport() {
-    const box = document.getElementById('bot-report');
-    if (!box) return;
-    const liveModes = (sessionReportData.live_modes && sessionReportData.live_modes.length)
-        ? sessionReportData.live_modes
-        : (reportData.live_modes || []);
-    const weakModes = (sessionReportData.weak_modes && sessionReportData.weak_modes.length)
-        ? sessionReportData.weak_modes
-        : (reportData.weak_modes || []);
-    const positions = reportData.positions || [];
-    const liveText = liveModes.length
-        ? liveModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(m.tier)} / PF ${escapeHtml(m.pf)} / 上限 ${escapeHtml(money(m.max_margin))}`).join('<br>')
-        : '暫無核心模式';
-    const weakText = weakModes.length
-        ? weakModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(m.tier)} / PF ${escapeHtml(m.pf)} / 上限 ${escapeHtml(money(m.max_margin))}`).join('<br>')
-        : '無弱勢模式';
-    const positionText = positions.length
-        ? positions.map((p) => `${escapeHtml(p.symbol)} ${escapeHtml(directionLabel(p.direction))} 入場 ${escapeHtml(num(p.entry))} / 現價 ${escapeHtml(num(p.current))} / PnL ${escapeHtml(signed(p.pnl))} / 最高 ${escapeHtml(p.highest_r ?? '-')}R / ${escapeHtml(zhText(p.stage))}`).join('<br>')
-        : '目前沒有真實持倉';
-
-    box.innerHTML = `
-        <div class="report-main">
-            <div><span>目前結論</span><strong>${escapeHtml(zhText(reportData.verdict || '掃描中'))}</strong><small>${escapeHtml(reportData.server_time || '-')}</small></div>
-            <div><span>持倉 / 候選</span><strong>${escapeHtml(reportData.active_count || 0)} / ${escapeHtml(reportData.potential_count || 0)}</strong><small>浮動 ${escapeHtml(signed(reportData.active_pnl || 0))}</small></div>
-            <div><span>出場保護</span><strong>MFE 鎖利</strong><small>${escapeHtml(zhText(reportData.protection_rule || '-'))}</small></div>
-        </div>
-        <div class="report-lines">
-            <div><span>核心火力</span><p>${liveText}</p></div>
-            <div><span>小火力探測</span><p>${weakText}</p></div>
-            <div><span>目前單子</span><p>${positionText}</p></div>
-        </div>
-    `;
+    const capitalStart = Number(dashboardCapital.start ?? START_EQUITY);
+    const capitalTarget = Number(dashboardCapital.target ?? TARGET_EQUITY);
+    const startLabel = document.getElementById('progress-start-label');
+    const targetLabel = document.getElementById('progress-target-label');
+    const titleLabel = document.getElementById('growth-title');
+    if (startLabel) startLabel.textContent = `${money(capitalStart)} USDT`;
+    if (targetLabel) targetLabel.textContent = `${money(capitalTarget)} USDT`;
+    if (titleLabel) titleLabel.textContent = `${verTag} 帳戶成長進度`;
 }
 
 function showSyncError(error) {
@@ -728,44 +721,203 @@ function showSyncError(error) {
     }
 }
 
+function healthStatusLabel(status) {
+    if (status === 'critical') return '嚴重異常';
+    if (status === 'warning') return '需注意';
+    return '正常';
+}
+
+function healthStatusClass(status) {
+    if (status === 'critical') return 'critical';
+    if (status === 'warning') return 'warning';
+    return 'good';
+}
+
+function renderHealthList(items, emptyLabel) {
+    if (!Array.isArray(items) || !items.length) {
+        return `<div class="health-item good"><strong>OK</strong><small>${escapeHtml(emptyLabel)}</small></div>`;
+    }
+    return items.map((item) => {
+        const titleParts = [item.symbol, item.strategy].filter(Boolean);
+        const title = titleParts.length ? titleParts.join(' / ') : 'unknown';
+        const meta = [
+            item.accounting_status ? `acct:${item.accounting_status}` : '',
+            item.protection_status ? `prot:${item.protection_status}` : '',
+            item.trailing_stage ? `stage:${item.trailing_stage}` : '',
+            item.source ? `src:${item.source}` : '',
+        ].filter(Boolean).join(' | ');
+        const reasons = Array.isArray(item.reasons) ? item.reasons.join(' | ') : String(item.reasons || '');
+        const klass = item.category || item.severity || 'warning';
+        return `
+            <div class="health-item ${escapeHtml(klass)}">
+                <strong>${escapeHtml(title)}</strong>
+                <small>${escapeHtml(meta)}</small>
+                <small>${escapeHtml(reasons)}</small>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderHealthCheck() {
+    const summary = document.getElementById('health-summary');
+    const blocks = document.getElementById('health-blocks');
+    const detail = document.getElementById('health-detail');
+    const stateEl = document.getElementById('health-check-state');
+    if (!summary || !blocks || !detail || !stateEl) return;
+
+    const data = healthCheckData || {};
+    const counts = data.counts || {};
+    const status = String(data.status || 'warning').toLowerCase();
+    const score = Number(data.score);
+    const runtime = data.runtime || {};
+    const version = data.strategy_version || currentStrategyVersion || 'v13';
+    const zeroStart = data.zero_start || {};
+    const snapshotAt = data.snapshot_at || data.generated_at || dashboardSnapshotAt || '-';
+
+    stateEl.textContent = `${healthStatusLabel(status)} / 分數 ${Number.isFinite(score) ? score.toFixed(0) : '-'}`;
+    summary.innerHTML = `
+        <div class="health-card">
+            <span>狀態</span>
+            <strong class="${healthStatusClass(status)}">${healthStatusLabel(status)}</strong>
+            <small>${escapeHtml(zhText(data.health_summary?.message || '已就緒'))}</small>
+        </div>
+        <div class="health-card">
+            <span>健康分數</span>
+            <strong class="${healthStatusClass(status)}">${Number.isFinite(score) ? score.toFixed(0) : '-'}</strong>
+            <small>版本 ${escapeHtml(version)}</small>
+        </div>
+        <div class="health-card">
+            <span>壞單數</span>
+            <strong class="${counts.bad_trades > 0 ? 'loss' : 'gain'}">${counts.bad_trades ?? 0}</strong>
+            <small>${counts.active_trades ?? 0} 個持倉 / ${counts.protection_warnings ?? 0} 個警告</small>
+        </div>
+        <div class="health-card">
+            <span>訓練異常</span>
+            <strong class="${counts.training_issues > 0 ? 'loss' : 'gain'}">${counts.training_issues ?? 0}</strong>
+            <small>${counts.quarantined_rows ?? 0} 筆隔離 / ${counts.version_mismatch_rows ?? 0} 筆版本不符</small>
+        </div>
+    `;
+
+    blocks.innerHTML = `
+        <div class="health-block">
+            <div class="health-block-title">
+                <strong>壞單清單</strong>
+                <span>${counts.bad_trades ?? 0} 筆</span>
+            </div>
+            <div class="health-list">
+                ${renderHealthList(data.bad_trades || [], '目前沒有壞單')}
+            </div>
+        </div>
+        <div class="health-block">
+            <div class="health-block-title">
+                <strong>保護警告</strong>
+                <span>${counts.protection_warnings ?? 0} 筆</span>
+            </div>
+            <div class="health-list">
+                ${renderHealthList(data.protection_warnings || [], '目前沒有保護警告')}
+            </div>
+        </div>
+    `;
+
+    detail.innerHTML = `
+        <div class="health-detail-card">
+            <h3>異常訓練資料</h3>
+            <span class="hint">包含隔離、版本不符、或不適合訓練的資料列。</span>
+            <div class="health-tags">
+                <span class="health-tag ${healthStatusClass(status)}">${healthStatusLabel(status)}</span>
+                <span class="health-tag">已驗證 ${counts.verified_rows ?? 0}</span>
+                <span class="health-tag ${counts.training_issues > 0 ? 'warning' : 'good'}">異常 ${counts.training_issues ?? 0}</span>
+            </div>
+            <div class="health-list">
+                ${renderHealthList(data.abnormal_training_rows || [], '目前沒有異常訓練資料')}
+            </div>
+        </div>
+        <div class="health-detail-card">
+            <h3>系統快照</h3>
+            <span class="hint">${escapeHtml(version)} / ${escapeHtml(snapshotAt)}</span>
+            <div class="health-tags">
+                <span class="health-tag ${runtime.run_mode === 'live' ? 'critical' : (runtime.run_mode === 'demo' ? 'warning' : 'good')}">${escapeHtml(runtime.run_mode === 'live' ? '實盤' : runtime.run_mode === 'demo' ? '模擬' : '自動')}</span>
+                <span class="health-tag">節點 ${escapeHtml(runtime.node_name || '-')}</span>
+                <span class="health-tag">持倉 ${counts.active_trades ?? 0}</span>
+                <span class="health-tag ${zeroStart.zero_start_mode ? 'good' : 'warning'}">零起點 ${zeroStart.zero_start_mode ? '啟用' : '關閉'}</span>
+            </div>
+            <span class="hint">${escapeHtml(zhText(data.health_summary?.message || '沒有其他備註'))}</span>
+        </div>
+    `;
+}
+
+async function fetchHealthCheck() {
+    const stateEl = document.getElementById('health-check-state');
+    if (stateEl) stateEl.textContent = '重新整理中...';
+    try {
+        const response = await fetch('/api/health-check', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`API ${response.status}`);
+        const data = await response.json();
+        healthCheckData = data && typeof data === 'object' ? data : {};
+        renderHealthCheck();
+    } catch (error) {
+        console.error('fetchHealthCheck failed', error);
+        if (stateEl) stateEl.textContent = '健康檢查失敗';
+        const summary = document.getElementById('health-summary');
+        const blocks = document.getElementById('health-blocks');
+        const detail = document.getElementById('health-detail');
+        if (summary) {
+            summary.innerHTML = `
+                <div class="health-card">
+                    <span>狀態</span>
+                    <strong class="loss">錯誤</strong>
+                    <small>${escapeHtml(error?.message || '健康檢查失敗')}</small>
+                </div>
+            `;
+        }
+        if (blocks) {
+            blocks.innerHTML = `
+                <div class="health-block">
+                    <div class="health-block-title"><strong>壞單清單</strong><span>0 筆</span></div>
+                    <div class="health-list"><div class="health-item critical"><strong>API 錯誤</strong><small>${escapeHtml(error?.message || '無法載入健康檢查資料')}</small></div></div>
+                </div>
+            `;
+        }
+        if (detail) {
+            detail.innerHTML = `
+                <div class="health-detail-card">
+                    <h3>系統快照</h3>
+                    <span class="hint">API 錯誤</span>
+                </div>
+            `;
+        }
+    }
+}
+
 function renderBotReport() {
     const box = document.getElementById('bot-report');
     if (!box) return;
-    const liveModes = (sessionReportData.live_modes && sessionReportData.live_modes.length)
-        ? sessionReportData.live_modes
-        : (reportData.live_modes || []);
-    const weakModes = (sessionReportData.weak_modes && sessionReportData.weak_modes.length)
-        ? sessionReportData.weak_modes
-        : (reportData.weak_modes || []);
-    const livePositions = Array.isArray(reportData.positions) ? reportData.positions : [];
-    const trackedPositions = Array.isArray(reportData.tracked_positions) ? reportData.tracked_positions : [];
-    const positions = livePositions;
-    const positionSource = livePositions.length ? 'OKX實際持倉' : 'OKX暫無持倉';
-    const sessionActiveCount = Number(reportData.session_active_count ?? 0);
-    const sessionPotentialCount = Number(reportData.session_potential_count ?? 0);
-    const sessionActivePnl = Number(reportData.session_active_pnl ?? 0);
-    const sessionRealizedPnl = Number(reportData.session_realized_pnl ?? 0);
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const metrics = getUnifiedReportMetrics();
+    const positions = metrics.positions;
+    const trackedPositions = metrics.trackedPositions;
+    const positionSource = positions.length ? 'OKX 實際持倉' : 'OKX 訓練持倉';
 
     const liveText = liveModes.length
-        ? liveModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(m.tier)} / PF ${escapeHtml(m.pf)} / margin ${escapeHtml(money(m.max_margin))}`).join('<br>')
-        : 'no live mode';
+        ? liveModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(modeTierLabel(m.tier))} / PF ${escapeHtml(num(m.pf, 3))} / 保證金 ${escapeHtml(money(m.max_margin))}`).join('<br>')
+        : '目前沒有核心實戰模式';
     const weakText = weakModes.length
-        ? weakModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(m.tier)} / PF ${escapeHtml(m.pf)} / margin ${escapeHtml(money(m.max_margin))}`).join('<br>')
-        : 'no weak mode';
+        ? weakModes.map((m) => `${escapeHtml(strategyLabel(m.strategy))} ${escapeHtml(modeTierLabel(m.tier))} / PF ${escapeHtml(num(m.pf, 3))} / 保證金 ${escapeHtml(money(m.max_margin))}`).join('<br>')
+        : '目前沒有弱勢模式';
     const positionText = positions.length
-        ? positions.map((p) => `${escapeHtml(positionSource)} · ${escapeHtml(p.symbol)} ${escapeHtml(directionLabel(p.direction))} entry ${escapeHtml(num(p.entry))} / now ${escapeHtml(num(p.current))} / PnL ${escapeHtml(signed(p.pnl))} / ${escapeHtml(zhText(p.stage))}`).join('<br>')
-        : (trackedPositions.length ? 'OKX 無持倉，僅有本地追蹤單未顯示為目前倉位' : 'no positions');
+        ? positions.map((p) => `${escapeHtml(positionSource)} · ${escapeHtml(p.symbol)} ${escapeHtml(directionLabel(p.direction))} 入場 ${escapeHtml(num(p.entry))} / 現價 ${escapeHtml(num(p.current))} / PnL ${escapeHtml(signed(p.pnl))} / ${escapeHtml(zhText(p.stage))}`).join('<br>')
+        : (trackedPositions.length ? '目前只有訓練持倉，尚無 OKX 實際持倉' : '目前沒有持倉');
 
     box.innerHTML = `
         <div class="report-main">
-            <div><span>report</span><strong>${escapeHtml(zhText(reportData.verdict || '-'))}</strong><small>${escapeHtml(reportData.server_time || '-')}</small></div>
-            <div><span>session</span><strong>${escapeHtml(sessionActiveCount)} / ${escapeHtml(sessionPotentialCount)}</strong><small>float ${escapeHtml(signed(sessionActivePnl))} / realized ${escapeHtml(signed(sessionRealizedPnl))}</small></div>
-            <div><span>protection</span><strong>MFE</strong><small>${escapeHtml(zhText(reportData.protection_rule || '-'))}</small></div>
+            <div><span>目前結論</span><strong>${escapeHtml(zhText(metrics.verdict || '-'))}</strong><small>${escapeHtml(metrics.serverTime || '-')}</small></div>
+            <div><span>實際 / 候選</span><strong>${escapeHtml(metrics.activeCount)} / ${escapeHtml(metrics.potentialCount)}</strong><small>浮動 ${escapeHtml(signed(metrics.activePnl))} / 會話 ${escapeHtml(signed(metrics.sessionActivePnl))}</small></div>
+            <div><span>出場保護</span><strong>MFE</strong><small>${escapeHtml(zhText(metrics.protectionRule || '-'))}</small></div>
         </div>
         <div class="report-lines">
-            <div><span>live modes</span><p>${liveText}</p></div>
-            <div><span>weak modes</span><p>${weakText}</p></div>
-            <div><span>positions</span><p>${positionText}</p></div>
+            <div><span>核心模式</span><p>${liveText}</p></div>
+            <div><span>觀察模式</span><p>${weakText}</p></div>
+            <div><span>持倉明細</span><p>${positionText}</p></div>
         </div>
     `;
 }
@@ -773,27 +925,33 @@ function renderBotReport() {
 function renderModeCards() {
     const container = document.getElementById('mode-cards');
     container.innerHTML = '';
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
     Object.entries(profiles).forEach(([name, profile]) => {
-        const stats = strategyStats[name] || {};
-        const perf = performanceData[name] || {};
-        const opt = optimizerData[name] || {};
+        const reportMode = reportModes.get(name) || {};
+        const stats = strategyStats[name] || sessionStrategyStats[name] || {};
+        const perf = performanceData[name] || sessionPerformanceData[name] || {};
+        const opt = optimizerData[name] || sessionOptimizerData[name] || {};
         const pnl = Number(stats.pnl || perf.total_pnl || 0);
         const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
+        const verdict = perf.verdict || stats.verdict || 'learning';
+        const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
+        const reasonText = reportMode.reason || verdictDetail(perf);
         const card = document.createElement('article');
         card.className = 'mode-card';
         card.innerHTML = `
             <div class="mode-card-head">
                 <strong>${strategyLabel(name)}</strong>
-                ${verdictBadge(perf.verdict)}
+                ${verdictBadge(verdict)}
             </div>
-            <p>${roleText[name] || profile.role || ''}</p>
+            <p>${tierLabel}</p>
             <div class="mode-stats">
                 <div><span>\u7e3d\u640d\u76ca</span><strong class="${pnl >= 0 ? 'gain' : 'loss'}">${money(pnl)}</strong></div>
                 <div><span>\u52dd\u7387</span><strong>${winRate}</strong></div>
                 <div><span>PF</span><strong class="${Number(perf.profit_factor || 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
                 <div><span>\u671f\u671b</span><strong class="${Number(perf.expectancy || 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
             </div>
-            <p class="mode-note">${verdictDetail(perf)}</p>
+            <p class="mode-note">${escapeHtml(reasonText)}</p>
             <p class="mode-note optimizer-note">${optimizerLine(opt)}</p>
             <div class="rule-line">60U x \u4fe1\u5fc3 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr}x ATR / TP ${profile.tp_atr}x ATR</div>
         `;
@@ -977,27 +1135,28 @@ function updateProgressCurve(pnlVal, signedProgress) {
     document.getElementById('progress-dot').setAttribute('class', `chart-dot${isDrawdown ? ' drawdown' : ''}`);
     
     const match = currentStrategyVersion.match(/v\d+/i);
-    const verTag = match ? match[0].toUpperCase() : 'V9';
+    const verTag = match ? match[0].toUpperCase() : 'V13';
     const pnlText = `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)} USDT`;
     const pctText = `${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%`;
 
-    document.getElementById('curve-label').textContent = `${verTag} 淨損益: ${pnlText} (${pctText})`;
+    document.getElementById('curve-label').textContent = `${verTag} 累積盈虧 ${pnlText} (${pctText})`;
     document.getElementById('curve-label').setAttribute('x', Math.max(60, Math.min(520, x - 28)));
     document.getElementById('curve-label').setAttribute('y', isDrawdown ? 174 : 28);
     
     const startLabel = document.getElementById('progress-start-label');
     const targetLabel = document.getElementById('progress-target-label');
     const titleLabel = document.getElementById('growth-title');
-    if (startLabel) startLabel.textContent = `0 USDT`;
-    if (targetLabel) targetLabel.textContent = `+5000 USDT`;
-    if (titleLabel) titleLabel.textContent = `${verTag} 策略累積損益進度`;
+    if (startLabel) startLabel.textContent = `${money(dashboardCapital.start ?? START_EQUITY)} USDT`;
+    if (targetLabel) targetLabel.textContent = `${money(dashboardCapital.target ?? TARGET_EQUITY)} USDT`;
+    if (titleLabel) titleLabel.textContent = `${verTag} 累積盈虧曲線`;
 }
 
 function updateOverview() {
-    const activePnl = currentTrades
-        .filter((trade) => trade.status === 'active')
-        .reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
-    const equity = Number(accountData.usdtEq || 0);
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalPnl = Number(capital.cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = metrics.activePnl;
     const pnlEl = document.getElementById('total-profit');
     if (pnlEl) {
         pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
@@ -1006,38 +1165,31 @@ function updateOverview() {
     const totalEquityEl = document.getElementById('total-equity');
     const availEl = document.getElementById('usdt-avail');
     if (totalEquityEl) totalEquityEl.textContent = money(equity);
-    if (availEl) availEl.textContent = money(accountData.usdtAvail || 0);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
 
-    const strategyTotalPnl = Object.values(performanceData || {}).reduce((sum, p) => sum + Number(p.total_pnl || 0), 0);
-    const capitalChange = strategyTotalPnl;
+    const capitalChange = capitalPnl;
     const capitalChangeEl = document.getElementById('capital-change');
     if (capitalChangeEl) {
         capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
         capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
     }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = 'V13 累積盈虧';
 
-    const targetProfitGoal = TARGET_EQUITY - START_EQUITY; // 5000
-    const signedProgress = (strategyTotalPnl / targetProfitGoal) * 100;
-    updateProgressCurve(strategyTotalPnl, signedProgress);
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct) ? Number(capital.goal_progress_pct) : (targetProfitGoal !== 0 ? (capitalPnl / targetProfitGoal) * 100 : 0);
+    updateProgressCurve(capitalPnl, signedProgress);
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = 'V13 累積盈虧曲線';
 
-    const match = currentStrategyVersion.match(/v\d+/i);
-    const verTag = match ? match[0].toUpperCase() : 'V9';
-
-    const perfList = Object.values(sessionPerformanceData || {});
-    const paused = perfList.filter((item) => item.verdict === 'pause').length;
-    const active = currentTrades.filter((item) => item.status === 'active').length;
     const verdictEl = document.getElementById('bot-verdict');
-    if (verdictEl) {
-        verdictEl.textContent = (accountData.capital || {}).state === 'drawdown'
-            ? `${verTag} 策略回撤中（仍持續掃描）`
-            : (paused >= 3 ? '四模式持續訓練中' : '正常監控');
-    }
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '掃描中');
     const summaryEl = document.getElementById('operator-summary');
     if (summaryEl) {
         summaryEl.innerHTML = `
-            <div><span>${active}</span><strong>筆持倉</strong></div>
-            <div><span>${paused}</span><strong>個模式目前屬於弱勢訓練</strong></div>
-            <div><span>${money(activePnl)}</span><strong>目前浮動損益</strong></div>
+            <div><span>${metrics.activeCount}</span><strong>實際持倉</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選訊號</strong></div>
+            <div><span>${money(activePnl)}</span><strong>浮動盈虧</strong></div>
         `;
     }
 }
@@ -1087,10 +1239,11 @@ function renderTrades() {
 
 async function fetchTrades() {
     try {
-        const response = await fetch('/api/trades');
+        const response = await fetch('/api/trades', { cache: 'no-store' });
         if (!response.ok) throw new Error(`API ${response.status}`);
         const data = await response.json();
         if (data.error) console.warn('api_trades fallback', data.error);
+        dashboardSnapshotAt = data.snapshot_at || data.generated_at || dashboardSnapshotAt;
         currentTrades = Array.isArray(data.trades) ? data.trades : [];
         radarData = data.radar && typeof data.radar === 'object' ? data.radar : {};
         runtimeStatus = data.runtime && typeof data.runtime === 'object' ? data.runtime : runtimeStatus;
@@ -1116,11 +1269,18 @@ async function fetchTrades() {
         renderRuntimeStatusV2();
         
         accountData = data.account && typeof data.account === 'object' ? data.account : {};
+        if (data.capital && typeof data.capital === 'object') {
+            accountData.capital = data.capital;
+            dashboardCapital = data.capital;
+        }
         profiles = data.profiles && typeof data.profiles === 'object' ? data.profiles : profiles;
         strategyStats = data.strategy_stats && typeof data.strategy_stats === 'object' ? data.strategy_stats : strategyStats;
         performanceData = data.performance && typeof data.performance === 'object' ? data.performance : performanceData;
         optimizerData = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : optimizerData;
         reportData = data.report && typeof data.report === 'object' ? data.report : reportData;
+        if (data.health_check && typeof data.health_check === 'object') {
+            healthCheckData = data.health_check;
+        }
 
         // Update Performance / Rehab Learning metadata (Version and Date range)
         const metaEl = document.getElementById('performance-metadata');
@@ -1128,6 +1288,9 @@ async function fetchTrades() {
             const ver = data.strategy_version || '--';
             currentStrategyVersion = ver;
             let dateStr = '無歷史交易';
+            const zeroStart = data.zero_start && typeof data.zero_start === 'object' ? data.zero_start : {};
+            const accountSource = data.account?.source || accountData.source || '-';
+            const snapshotAt = data.snapshot_at || data.generated_at || dashboardSnapshotAt || '-';
             if (data.journal_start && data.journal_end) {
                 const formatTime = (ts) => {
                     const d = new Date(ts);
@@ -1135,7 +1298,25 @@ async function fetchTrades() {
                 };
                 dateStr = `${formatTime(data.journal_start)} 至 ${formatTime(data.journal_end)}`;
             }
-            metaEl.textContent = `機器人版本: ${ver} | 數據統計區間: ${dateStr}`;
+            const zeroStartLabel = zeroStart.zero_start_mode ? '零起點啟用' : '零起點關閉';
+            const resetAt = zeroStart.reset_at ? new Date(zeroStart.reset_at).toLocaleString() : '-';
+            metaEl.textContent = `版本 ${ver}｜${zeroStartLabel}｜快照 ${snapshotAt}｜來源 ${zhText(accountSource)}｜重置 ${resetAt}｜範圍 ${dateStr}`;
+        }
+
+        const bannerState = document.getElementById('version-banner-state');
+        const bannerReset = document.getElementById('version-banner-reset');
+        const bannerNode = document.getElementById('version-banner-node');
+        const banner = data.zero_start && typeof data.zero_start === 'object' ? data.zero_start : {};
+        if (bannerState) {
+            bannerState.textContent = banner.zero_start_mode
+                ? '本機乾淨訓練資料已啟用'
+                : '零起點設定檔未啟用或不存在';
+        }
+        if (bannerReset) {
+            bannerReset.textContent = `重置時間：${banner.reset_at ? new Date(banner.reset_at).toLocaleString() : '-'}`;
+        }
+        if (bannerNode) {
+            bannerNode.textContent = `節點：${banner.node_name || runtimeStatus.node_name || '-'}`;
         }
 
         refreshSessionMetrics();
@@ -1147,6 +1328,7 @@ async function fetchTrades() {
         renderPerformance();
         renderTrades();
         renderRadar();
+        renderHealthCheck();
         
         // Render ML logs inside the Evolutionary Console with type safety
         const logConsole = document.getElementById('ml-log-console');
@@ -1170,7 +1352,7 @@ async function fetchTrades() {
 
 async function fetchHistory() {
     try {
-        const response = await fetch('/api/history');
+        const response = await fetch('/api/history', { cache: 'no-store' });
         const data = await response.json();
         historyData = Array.isArray(data.history) ? data.history : [];
         refreshSessionMetrics();
@@ -1182,11 +1364,9 @@ async function fetchHistory() {
 
 async function fetchIntelligence() {
     try {
-        const response = await fetch('/api/intelligence');
+        const response = await fetch('/api/intelligence', { cache: 'no-store' });
         const data = await response.json();
         profiles = data.profiles && typeof data.profiles === 'object' ? data.profiles : profiles;
-        performanceData = data.performance && typeof data.performance === 'object' ? data.performance : performanceData;
-        optimizerData = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : optimizerData;
         document.getElementById('intel-logic').textContent = '\u6bcf\u5c0f\u6642\u91cd\u65b0\u6311\u9078\u9ad8\u6d41\u52d5\u6027\u5e63\u7a2e\uff0c\u56db\u500b\u6a21\u5f0f\u5206\u5225\u6383\u63cf\uFF0C\u4ee5\u52dd\u7387\u8207 PF \u6c7a\u5b9a\u4fe1\u5fc3\u5009\u4f4d\u3002';
         const cloud = document.getElementById('intel-symbols');
         cloud.innerHTML = '';
@@ -1272,7 +1452,7 @@ function renderEngineHeartbeat() {
     const engines = ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter'];
     container.innerHTML = engines.map(name => {
         const meta = ENGINE_META[name] || { icon: '•', desc: name, color: '#888' };
-        const stats = sessionStrategyStats[name] || {};
+        const stats = strategyStats[name] || sessionStrategyStats[name] || {};
         const perf = performanceData[name] || {};
         const opt = optimizerData[name] || {};
         const active = engineActive[name] || 0;
@@ -1280,7 +1460,7 @@ function renderEngineHeartbeat() {
         const pnl = enginePnl[name] || 0;
         const wr = perf.win_rate != null ? perf.win_rate + '%' : '--';
         const conf = opt.capital_mult != null ? opt.capital_mult.toFixed(2) : (stats.confidence != null ? stats.confidence.toFixed(2) : '1.00');
-        const verdict = perf.tier || 'D (Training/Explore)';
+        const verdict = verdictLabel(perf.verdict || 'learning');
         const verdictColor = perf.state === 'exploit' ? '#22c55e' : perf.state === 'steady' ? '#60a5fa' : perf.state === 'pause' ? '#ef4444' : '#f59e0b';
 
         // Get detailed block reason from radarDict for this strategy
@@ -1294,7 +1474,7 @@ function renderEngineHeartbeat() {
             // Get the block reason from the first item in radar queue
             const firstRadar = strategyRadar[0];
             if (firstRadar) {
-                const reason = firstRadar.trigger_reason || firstRadar.block_reason || '掃描型態中 (Scanning)';
+                const reason = firstRadar.trigger_reason || firstRadar.block_reason || '掃描中';
                 detailedWaitingReason = `<div style="color: var(--muted); font-size: 10px; margin-top: 4px; border-left: 2px solid var(--line); padding-left: 4px;">⏳ 等待原因：${escapeHtml(zhReason(reason))} (${escapeHtml(firstRadar.symbol)})</div>`;
             } else {
                 detailedWaitingReason = `<div style="color: var(--soft); font-size: 10px; margin-top: 4px;">⏳ 掃描中，目前無合適諧波區間</div>`;
@@ -1364,6 +1544,7 @@ async function syncGithub() {
 
     try {
         const response = await fetch('/api/git-pull', {
+            cache: 'no-store',
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1411,6 +1592,7 @@ async function resetOptimizer() {
 
     try {
         const response = await fetch('/api/reset-optimizer', {
+            cache: 'no-store',
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1436,6 +1618,46 @@ async function resetOptimizer() {
     }
 }
 
+async function resetTraining() {
+    if (!confirm('這會備份目前所有訓練資料、optimizer 與 cycle state，然後把本機訓練完全重置為 0。確定要繼續嗎？')) {
+        return;
+    }
+
+    const btn = document.getElementById('reset-training-btn');
+    if (!btn) return;
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.innerHTML = '<span>重置訓練中...</span>';
+
+    try {
+        const response = await fetch('/api/reset-training', {
+            cache: 'no-store',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+        if (response.ok && data.success) {
+            alert(data.message);
+            location.reload();
+        } else {
+            alert(`重置訓練失敗: ${data.message || '未知錯誤'}`);
+        }
+    } catch (err) {
+        alert(`重置訓練失敗: ${err.message}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            btn.innerHTML = originalText;
+        }
+    }
+}
+
 async function depositDemoAsset() {
     const btn = document.getElementById('deposit-demo-btn');
     const originalText = btn ? btn.innerHTML : '';
@@ -1447,6 +1669,7 @@ async function depositDemoAsset() {
 
     try {
         const response = await fetch('/api/deposit-demo', {
+            cache: 'no-store',
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'

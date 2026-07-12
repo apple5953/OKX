@@ -17,8 +17,8 @@ def build_trade_plan(direction: str, x_price: float, a_price: float, c_price: fl
         
         base_price = min(d_price, x_price) if use_x_for_sl else d_price
         sl = base_price - sl_buffer
-        # Enforce minimum 1.5% stop loss distance from entry (d_price) to prevent narrow stop outs
-        min_sl_dist = d_price * 0.015
+        # Keep the theoretical SL usable on low-priced symbols without forcing a very wide floor.
+        min_sl_dist = d_price * 0.008
         if abs(d_price - sl) < min_sl_dist:
             sl = d_price - min_sl_dist
             
@@ -29,8 +29,8 @@ def build_trade_plan(direction: str, x_price: float, a_price: float, c_price: fl
         
         base_price = max(d_price, x_price) if use_x_for_sl else d_price
         sl = base_price + sl_buffer
-        # Enforce minimum 1.5% stop loss distance from entry (d_price) to prevent narrow stop outs
-        min_sl_dist = d_price * 0.015
+        # Keep the theoretical SL usable on low-priced symbols without forcing a very wide floor.
+        min_sl_dist = d_price * 0.008
         if abs(sl - d_price) < min_sl_dist:
             sl = d_price + min_sl_dist
 

@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import socket
+import shutil
 from types import SimpleNamespace
 from . import config
 from . import state
@@ -89,11 +90,33 @@ def load_json_list(path, label):
         print(f"Failed to load {label} state: {e}; backup={backup}")
         return []
 
+def load_json_dict(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
 def as_float(value, default=0.0):
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+def has_valid_protection(trade):
+    if not isinstance(trade, dict):
+        return False
+    sl = as_float(trade.get('sl'))
+    tp1 = as_float(trade.get('tp1'))
+    if sl <= 0 or tp1 <= 0:
+        return False
+    status = str(trade.get('protection_status') or '').lower()
+    if status in {'failed', 'pending'}:
+        return False
+    return True
 
 def session_start_equity():
     if config.SESSION_START_EQUITY_USDT is None:
@@ -158,7 +181,7 @@ def lifecycle_trade_for_history(record):
     inst_id = str(info.get('instId') or record.get('instId') or '')
     direction = str(info.get('direction') or record.get('side') or '').lower()
     candidates = []
-    for trade in state.trade_journal + state.active_trades:
+    for trade in list(reversed(state.active_trades)) + list(reversed(state.trade_journal)):
         if str(trade.get('posId') or '') != pos_id:
             continue
         trade_open_ms = trade_open_timestamp_ms(trade)
@@ -173,13 +196,14 @@ def lifecycle_trade_for_history(record):
         distance = abs(trade_open_ms - opened_ms)
         if distance <= config.LIFECYCLE_OPEN_TOLERANCE_MS:
             manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            candidates.append((manual_rank, distance, trade_open_ms, trade))
+            active_rank = 0 if trade in state.active_trades else 1
+            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
     if not candidates and pos_id:
         # Some OKX history payloads expose a distinct record id while the
         # lifecycle match lives under info.posId. If the timestamp tolerance
         # misses, fall back to a strict posId/instId/direction match so the
         # strategy identity is not lost and later normalized to Manual.
-        for trade in state.trade_journal + state.active_trades:
+        for trade in list(reversed(state.active_trades)) + list(reversed(state.trade_journal)):
             trade_pos_id = str(trade.get('posId') or '')
             if trade_pos_id != pos_id:
                 continue
@@ -192,12 +216,13 @@ def lifecycle_trade_for_history(record):
             trade_open_ms = trade_open_timestamp_ms(trade)
             distance = abs(trade_open_ms - opened_ms) if trade_open_ms and opened_ms else 0
             manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            candidates.append((manual_rank, distance, trade_open_ms, trade))
+            active_rank = 0 if trade in state.active_trades else 1
+            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
     if not candidates and inst_id and direction:
         # Broader recovery path: if the exact posId match is missing, try to
         # recover the lifecycle from the same instrument/direction pair near the
         # recorded open time instead of defaulting to Manual immediately.
-        for trade in state.trade_journal + state.active_trades:
+        for trade in list(reversed(state.active_trades)) + list(reversed(state.trade_journal)):
             trade_inst = str(trade.get('instId') or '')
             trade_direction = str(trade.get('direction') or '').lower()
             if trade_inst and inst_id and trade_inst != inst_id:
@@ -214,10 +239,114 @@ def lifecycle_trade_for_history(record):
             else:
                 distance = 0
             manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            candidates.append((manual_rank, distance, trade_open_ms, trade))
+            active_rank = 0 if trade in state.active_trades else 1
+            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
     if not candidates:
         return None
-    return min(candidates, key=lambda row: (row[0], row[1], -row[2]))[3]
+    return min(candidates, key=lambda row: (row[0], row[1], row[2], -row[3]))[4]
+
+def default_training_cycle_state():
+    return {
+        'generation': config.STRATEGY_VERSION,
+        'last_evaluated_trade_count': 0,
+        'completed_cycles': 0,
+        'consecutive_positive_cycles': 0,
+        'last_checked_at': None,
+        'mode': 'training_active',
+        'summary': {},
+        'top_drags': [],
+        'strategies': {},
+        'notes': '',
+    }
+
+def zero_start_manifest():
+    return {
+        'node_name': config.NODE_NAME,
+        'strategy_version': config.STRATEGY_VERSION,
+        'zero_start_mode': True,
+        'bootstrapped_at': datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+
+def ensure_zero_start_storage(force=False):
+    if not config.ZERO_START_MODE and not force:
+        return {
+            'reset': False,
+            'reason': 'zero-start disabled',
+            'manifest_path': config.ZERO_START_STATE_FILE,
+        }
+
+    manifest_path = config.ZERO_START_STATE_FILE
+    manifest = load_json_dict(manifest_path)
+    current_version = str(config.STRATEGY_VERSION).strip().lower()
+    saved_version = str(manifest.get('strategy_version') or '').strip().lower()
+    saved_node = str(manifest.get('node_name') or '').strip().lower()
+    saved_mode = bool(manifest.get('zero_start_mode'))
+
+    needs_reset = (
+        force
+        or not manifest
+        or not saved_mode
+        or saved_version != current_version
+        or saved_node != str(config.NODE_NAME).strip().lower()
+    )
+
+    if not needs_reset:
+        return {
+            'reset': False,
+            'reason': 'manifest already matches current generation',
+            'manifest_path': manifest_path,
+            'manifest': manifest,
+        }
+
+    backup_root = os.path.join(config.PROJECT_DIR, 'backups')
+    backup_dir = os.path.join(
+        backup_root,
+        f"zero-start-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
+    os.makedirs(backup_dir, exist_ok=True)
+
+    paths_to_backup = [
+        config.JOURNAL_FILE,
+        config.TRADE_FILE,
+        config.LEGACY_JOURNAL_FILE,
+        config.LEGACY_TRADE_FILE,
+        *config.LOCAL_ACCOUNT_SNAPSHOT_PATHS,
+        config.ZERO_START_STATE_FILE,
+        config.GLOBAL_OPTIMIZER_FILE,
+        config.TRAINING_CYCLE_STATE_FILE,
+    ]
+    for raw_path in paths_to_backup:
+        if not raw_path or not os.path.exists(raw_path):
+            continue
+        try:
+            shutil.move(raw_path, os.path.join(backup_dir, os.path.basename(raw_path)))
+        except Exception:
+            pass
+
+    write_json_atomic(config.JOURNAL_FILE, [])
+    write_json_atomic(config.TRADE_FILE, [])
+    write_json_atomic(config.GLOBAL_OPTIMIZER_FILE, {})
+    write_json_atomic(config.TRAINING_CYCLE_STATE_FILE, default_training_cycle_state())
+
+    manifest_payload = zero_start_manifest()
+    manifest_payload.update({
+        'reset_at': datetime.datetime.now(datetime.UTC).isoformat(),
+        'backup_dir': backup_dir,
+        'reset_reason': 'first launch or version change requires zero-start',
+    })
+    write_json_atomic(manifest_path, manifest_payload)
+
+    print(
+        f"[Zero-Start] Initialized V{config.STRATEGY_VERSION} zero-start for {config.NODE_NAME}; "
+        f"backup={backup_dir}"
+    )
+    return {
+        'reset': True,
+        'reason': 'initialized zero-start storage',
+        'manifest_path': manifest_path,
+        'manifest': manifest_payload,
+        'backup_dir': backup_dir,
+    }
 
 def assess_accounting_record(record, lifecycle):
     """Keep suspicious OKX history visible, but out of learning and sizing."""
@@ -251,6 +380,11 @@ def assess_accounting_record(record, lifecycle):
         config.MAX_PLANNED_LOSS_USDT,
     )
     reasons = []
+    lifecycle_sl = as_float(lifecycle.get('sl'))
+    lifecycle_tp1 = as_float(lifecycle.get('tp1'))
+    protection_status = str(lifecycle.get('protection_status') or '').lower()
+    if lifecycle_sl <= 0 or lifecycle_tp1 <= 0 or protection_status in {'failed', 'pending', 'unconfirmed'}:
+        reasons.append('missing TP/SL protection')
 
     if expected_entry > 0 and open_price > 0:
         entry_tolerance = max(expected_entry * 0.01, stop_distance * 2.0)

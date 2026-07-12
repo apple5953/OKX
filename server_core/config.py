@@ -31,6 +31,26 @@ def _first_non_empty(*values):
     return ''
 
 
+def _float_env(name, default):
+    raw = _first_non_empty(os.getenv(name))
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _int_env(name, default):
+    raw = _first_non_empty(os.getenv(name))
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except ValueError:
+        return int(default)
+
+
 def load_okx_profile_config():
     candidate_paths = []
     env_path = _first_non_empty(os.getenv('OKX_CONFIG_PATH'), os.getenv('OKX_CONFIG_TOML'))
@@ -103,8 +123,7 @@ OKX_SECRET = _first_non_empty(os.getenv('OKX_API_SECRET'), os.getenv('OKX_SECRET
 OKX_PASSWORD = _first_non_empty(os.getenv('OKX_PASSPHRASE'), os.getenv('OKX_PASSWORD'), OKX_PROFILE.get('password'))
 OKX_SITE = _first_non_empty(os.getenv('OKX_SITE'), OKX_PROFILE.get('site'))
 RUN_MODE = resolve_run_mode()
-FORCE_MOCK_MODE = RUN_MODE == 'mock' or _env_flag('OKX_FORCE_MOCK') or _env_flag('OKX_SIMULATION_MODE')
-MOCK_MODE = FORCE_MOCK_MODE
+MOCK_MODE = RUN_MODE == 'mock' or _env_flag('OKX_FORCE_MOCK') or _env_flag('OKX_SIMULATION_MODE')
 DEMO_MODE = RUN_MODE == 'demo'
 LIVE_MODE = RUN_MODE == 'live'
 OKX_SANDBOX_MODE = DEMO_MODE or _env_flag('OKX_FORCE_SANDBOX') or bool(OKX_PROFILE.get('demo'))
@@ -113,7 +132,9 @@ OKX_SANDBOX_MODE = DEMO_MODE or _env_flag('OKX_FORCE_SANDBOX') or bool(OKX_PROFI
 # 若為 True，或 API 金鑰留空/無效時，機器人會轉為「本地虛擬開平倉」，不發送真實訂單到 OKX，專門用於無白名單權限的電腦進行訓練。
 
 BASE_MARGIN_USDT = 60.0
-STRATEGY_VERSION = 'v12'
+STRATEGY_VERSION = 'v13'
+ALLOW_LEGACY_LEARNING = _env_flag('OKX_ALLOW_LEGACY_LEARNING')
+ZERO_START_MODE = not _env_flag('OKX_DISABLE_ZERO_START')
 START_EQUITY_USDT = 5000.0
 TARGET_EQUITY_USDT = 10000.0
 SESSION_STARTED_AT = datetime.datetime.now().isoformat(timespec='seconds')
@@ -194,11 +215,20 @@ MARKET_DATA_TTL_SECONDS = {
 NODE_NAME = resolve_node_name()
 TRADE_FILE = str(PROJECT_DIR / f'active_trades_{NODE_NAME}.json')
 JOURNAL_FILE = str(PROJECT_DIR / f'journal_{NODE_NAME}.json')
+ZERO_START_STATE_FILE = str(PROJECT_DIR / f'zero_start_state_{NODE_NAME}.json')
+GLOBAL_OPTIMIZER_FILE = str(PROJECT_DIR / 'global_optimizer.json')
+TRAINING_CYCLE_STATE_FILE = str(PROJECT_DIR / 'optimization_cycle_state.json')
 LEGACY_TRADE_FILE = str(PROJECT_DIR / 'active_trades.json')
 LEGACY_JOURNAL_FILE = str(PROJECT_DIR / 'trade_journal.json')
 
 LOCAL_MARKET_SNAPSHOT_PATH = str(WORKSPACE_DIR / 'auto-trader-swap' / 'state' / 'market-snapshot.json')
+LOCAL_LIVE_SNAPSHOT_PATH = str(PROJECT_DIR / 'state' / 'okx_live_snapshot.json')
+LOCAL_POSITIONS_SNAPSHOT_PATHS = [
+    LOCAL_LIVE_SNAPSHOT_PATH,
+    str(PROJECT_DIR / 'state' / 'okx_live_positions_snapshot.json'),
+]
 LOCAL_ACCOUNT_SNAPSHOT_PATHS = [
+    LOCAL_LIVE_SNAPSHOT_PATH,
     str(PROJECT_DIR / 'api_dump.json'),
     str(PROJECT_DIR / 'api_output.json'),
 ]
