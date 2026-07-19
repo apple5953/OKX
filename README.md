@@ -1,354 +1,473 @@
 # OKX Harmonic Trading Agent
 
-Multi-node trading and training center for OKX.
+## Robot Version
 
-This repo is built for a mixed setup:
+- Robot family: OKX Harmonic Trading Agent
+- Active strategy generation: `V13`
+- Documentation update: `V13.2 Mac mini training handoff`
+- Last reviewed: `2026-07-19`
+- Default training target: OKX demo / sandbox, not real capital
 
-- one main machine can run OKX demo or live trading if it has valid OKX API access and the right permissions
-- every other machine can still participate in market scanning, simulated trades, and journal collection
-- GitHub Actions merges all node journals into a global optimizer
+This repository contains a four-mode OKX trading and training robot. It can scan high-liquidity USDT swap markets, route each symbol into a market regime, collect trade samples, and update strategy performance through per-node journals.
 
----
-
-## 🔐 Google 登入與集中式權限控管系統 (Google Sign-In & Permissions)
-
-本專案引入了中央授權機制，透過 **Google 帳號身分驗證** 與 **Google 試算表 (Google Sheet)** 控制每台電腦節點的權限，適合「多台電腦協同訓練與交易」的安全管理：
-
-### 1. 授權核心原則
-*   **Google 驗證身分**：首次啟動本機精靈時，會自動引導使用者透過瀏覽器登入 Google 帳號。
-*   **GAS 後端控管**：登入後會透過 Google Apps Script (GAS) 查詢雲端試算表名單：
-    *   **非本人（新使用者）**：若 Google 帳號不在白名單上，系統會自動在 Excel 註冊此人，並強制指派其本機機器人運行於 **`mock` (模擬單)** 模式。
-    *   **本人（管理員）**：在試算表中被手動指定為 `demo` 或 `live` 模式，才能載入並使用本機的 OKX API Key 進行實盤或沙盒交易。
-*   **本機一鍵啟動精靈**：登入完成後會自動建立該節點的憑證與全新空白的 `journal_<NODE_NAME>.json` 資料庫，之後每次啟動都走靜默自動流程，無須手動重複設定。
-
-### 2. 試算表 (Google Sheet) 格式配置
-請確保您的 Google 試算表首行欄位設定為：
-*   **A 欄**：`Email` (使用者 Google 信箱)
-*   **B 欄**：`Mode` (手動填入 `live`、`demo` 或自動產生的 `mock`)
-*   **C 欄**：`Expiration Date` (授權過期日，格式為 `yyyy-mm-dd`)
-*   **D 欄**：`Active Devices` (系統自動在此處寫入 JSON 格式的已綁定裝置名稱與最後活躍時間)
+Important: this robot is still in training. The current configuration is suitable for collecting demo samples. It is not proof that the system can already produce long-term stable profit with larger real-money sizing.
 
 ---
 
-## Modes
+## Current Four-Mode Design
 
-The bot supports explicit run modes.
-
-| Mode | Purpose | Behavior |
+| Mode | Market Type | Role |
 | --- | --- | --- |
-| `auto` | Default | Try OKX access based on credentials and mode settings |
-| `mock` | Local simulation only | Never try to run as live; safe for secondary machines |
-| `demo` | OKX sandbox/demo | Connects to OKX demo trading, not local mock |
-| `live` | Primary machine | Use real OKX trading when credentials and whitelist work |
+| `MacroSniper` | `TREND` | Trend continuation and breakout follow-through |
+| `MeanReversion` | `MEAN_REVERSION` | Range-bound mean reversion after stretched moves |
+| `Contrarian` | `EXTREME_REVERSAL` | Extreme reversal after exhaustion, divergence, or false move |
+| `SqueezeHunter` | `SQUEEZE_BREAKOUT` | Volatility compression followed by breakout expansion |
 
-Set it with:
+The robot does not simply rotate modes. It first uses the market router to classify each symbol, then assigns that symbol to the mode with the best expected fit.
 
-```powershell
-$env:OKX_RUN_MODE = "mock"
+Current training safeguards:
+
+- Top-volume universe target: `OKX_MARKET_UNIVERSE_LIMIT=100`
+- Universe refresh interval: `OKX_MARKET_UNIVERSE_REFRESH_SECONDS=3600`
+- Demo fast-training scan loop: about `12` seconds by default
+- Per-loop scan target: `OKX_SCAN_SYMBOLS_PER_LOOP=100`
+- Weak modes can still collect demo samples through a reduced-size training probe
+- Training probe default margin: `8U`
+
+---
+
+## Mac Mini Training Verdict
+
+You can use the same strategy settings on a Mac mini, but the Mac mini must run as an independent training node.
+
+Recommended use:
+
+- Same codebase
+- Same strategy generation: `V13`
+- Same OKX demo settings if you intentionally want demo execution
+- Unique `OKX_NODE_NAME`
+- Fresh zero-start journal
+- No shared `active_trades` file
+
+Not recommended:
+
+- Do not copy the Windows active session and continue it on Mac mini.
+- Do not let Windows and Mac mini use the same OKX demo account to auto-order at the same time.
+- Do not reuse the same node name on two machines.
+- Do not commit active trade state, credentials, screenshots, or `.deps`.
+
+Why: active trades contain exchange position IDs, protection order IDs, lifecycle IDs, and node-specific accounting. Copying them across machines can corrupt attribution and TP/SL management.
+
+---
+
+## Critical Rules For AI Agents Installing On Mac Mini
+
+When an AI agent helps install or run this robot on Mac mini, it must follow these rules exactly.
+
+1. Confirm node identity first.
+
+```bash
+export OKX_NODE_NAME=macmini_02
 ```
 
-or:
+Use a new unique name for every physical machine. Never reuse the Windows node name.
+
+2. Confirm run mode before launch.
 
 ```bash
 export OKX_RUN_MODE=mock
 ```
 
-Windows users also have:
+Use `mock` for first boot and UI verification. Use `demo` only after credentials, health, and port status are verified.
 
-- `set-run-mode.bat`
-- `run-mock.bat`
-- `run-demo.bat`
-- `run-live.bat`
-
-## Credentials
-
-Set your OKX credentials as environment variables on the machine that should connect to OKX.
-
-Required variables:
-
-- `OKX_API_KEY`
-- `OKX_API_SECRET`
-- `OKX_PASSPHRASE`
-
-Examples:
-
-```powershell
-$env:OKX_API_KEY = "your_api_key"
-$env:OKX_API_SECRET = "your_api_secret"
-$env:OKX_PASSPHRASE = "your_passphrase"
-```
+3. Run zero-start for a new Mac mini.
 
 ```bash
-export OKX_API_KEY=your_api_key
-export OKX_API_SECRET=your_api_secret
-export OKX_PASSPHRASE=your_passphrase
+./scripts/bootstrap-zero-start.sh macmini_02 mock
 ```
 
-If a machine does not have valid credentials, it should not be treated as a valid OKX demo machine until the credentials and permissions are fixed.
+This backs up old local state and creates clean files:
 
-## What this repo does
+- `journal_macmini_02.json`
+- `active_trades_macmini_02.json`
+- `zero_start_state_macmini_02.json`
 
-- Runs a local bot on each machine.
-- Keeps each machine's trade state and journal separate.
-- Uses `journal_*.json` for aggregation.
-- Builds `global_optimizer.json` from all node journals.
-- Prevents legacy shared journals from polluting zero-start training.
+4. Never copy these as live source of truth from Windows to Mac mini:
 
-## Node identity
+- `active_trades_desktop-*.json`
+- `account_session_baseline_desktop-*.json`
+- `zero_start_state_desktop-*.json`
+- `optimization_cycle_state.json`
+- `auth_token.json`
+- `.deps/`
 
-Every machine must have a unique node name.
+5. Only journal files are training outputs.
 
-Recommended:
+The file that may be merged later is:
 
-- Windows: set `OKX_NODE_NAME`
-- macOS/Linux: set `OKX_NODE_NAME`
+- `journal_macmini_02.json`
 
-Fallback behavior:
+Do not commit:
 
-- If no env var is set, `server_core/config.py` generates a node name from hostname plus a stable suffix.
+- `active_trades_*.json`
+- `.deps/`
+- `auth_token.json`
+- screenshots
+- account snapshots
+- local logs
+- backup folders
 
-Examples:
+6. Do not run two auto-order engines on the same OKX account.
 
-```powershell
-$env:OKX_NODE_NAME = "macmini_01"
-```
+If Windows is already demo auto-ordering, keep Mac mini in `mock` or stop Windows before enabling Mac mini `demo`.
+
+7. Confirm port `5000` is free.
+
+macOS AirPlay Receiver often uses port `5000`. If the UI does not start, check:
 
 ```bash
-export OKX_NODE_NAME=macmini_01
+lsof -i :5000
 ```
 
-You can also persist the name with:
+If AirPlay owns it, disable AirPlay Receiver or modify the app to use a configurable port.
 
-- `set-node-name.bat`
+8. Prevent Mac mini sleep.
 
-## First launch: zero-start
-
-V13 uses a per-machine zero-start manifest. On the first launch, or whenever
-the manifest is missing or the strategy version changes, the launcher backs up
-old local history and rebuilds a clean empty journal before the bot starts.
-
-Windows:
-
-```powershell
-.\set-node-name.bat macmini_01
-```
-
-```powershell
-.\set-run-mode.bat mock
-```
-
-```powershell
-.\run-zero-start.bat macmini_01
-```
-
-```powershell
-.\run-zero-start.bat macmini_01 demo
-```
-
-Or double-click:
-
-- `set-node-name.bat`
-- `set-run-mode.bat`
-- `run-zero-start.bat`
-- `run-mock.bat`
-- `run-demo.bat`
-- `run-live.bat`
-
-macOS/Linux:
+Training stops when macOS sleeps. For a temporary session:
 
 ```bash
-export OKX_NODE_NAME=macmini_01
-export OKX_RUN_MODE=mock
-./scripts/bootstrap-zero-start.sh macmini_01
+caffeinate -dimsu ./start-main.sh macmini_02 demo
 ```
 
-What zero-start does:
+For long-running training, configure Energy Settings or launchd.
 
-- backs up any existing `journal_<NODE_NAME>.json`
-- backs up any existing `active_trades_<NODE_NAME>.json`
-- backs up legacy `trade_journal.json` and `active_trades.json`
-- writes `zero_start_state_<NODE_NAME>.json` so the machine remembers it has been initialized
-- creates fresh empty `[]` files for the current machine
-- launches the bot unless `-SkipLaunch` / `SKIP_LAUNCH=1` is used
+9. Verify dependencies in a local venv.
 
-## Normal launch
+The launcher creates `.deps/venv` and installs:
 
-Windows:
+- `ccxt`
+- `pandas`
+- `flask`
 
-```powershell
-run_bot.bat
-```
+The current script does not pin exact package versions. If reproducibility matters, create a lock file before long training.
 
-One-click main launcher:
+10. Watch the OKX CLI fallback issue.
 
-```powershell
-start-main.bat
-```
+The main path uses `ccxt` REST and is cross-platform. However, the current fallback for OKX CLI in `server_core/okx_client.py` still assumes Windows paths such as `okx.cmd` and `powershell.exe`.
 
-`run_bot.bat` and `start-main.bat` both re-check the zero-start manifest, so a
-brand new machine still starts from 0 even if you skip the explicit bootstrap
-step.
+Impact:
 
-macOS/Linux:
+- Mac mini can still run if REST works.
+- If REST balance or positions temporarily fail, CLI fallback may fail on macOS.
+- This should be fixed before relying on Mac mini as the main demo execution node.
+
+---
+
+## Mac Mini Installation Checklist
+
+Run these commands on Mac mini from a terminal.
+
+1. Install or verify basic tools.
 
 ```bash
-run_bot.sh
+git --version
+python3 --version
 ```
 
-One-click main launcher:
+Python 3.11+ is recommended.
+
+2. Clone or update the repository.
 
 ```bash
-./start-main.sh
+git clone https://github.com/apple5953/OKX.git
+cd OKX/harmonic_agent
 ```
 
-`run_bot.sh` and `start-main.sh` perform the same manifest check on Mac/Linux.
-
-The local UI opens automatically at `http://127.0.0.1:5000` unless you set `OKX_OPEN_UI=0`.
-
-## Training flow
-
-1. Each machine writes to its own `journal_<NODE_NAME>.json`.
-2. Secondary machines can stay in `mock` mode and still produce useful journals.
-3. The server does not auto-load legacy shared journals on startup.
-4. GitHub Actions merges all `journal_*.json` files.
-5. `optimize_global.py` computes a fresh `global_optimizer.json`.
-6. Each node pulls the updated optimizer and continues with its own local journal.
-
-## Dashboard sync rules
-
-To keep the UI consistent, the dashboard now follows these source rules:
-
-1. Top summary, mode console, and health status prefer the live `/api/trades` report.
-2. Session history is only used as a fallback when the live report does not provide a value.
-3. Strategy cards prefer backend strategy stats first, then local session stats.
-4. The engine heartbeat panel prefers backend strategy stats so the cards and top summary stay aligned.
-5. Zero-start banners only show the current machine's local bootstrap state, not another machine's history.
-
-## What each machine can do
-
-### Live machine
-
-- place real OKX orders
-- read live positions and balances
-- keep real execution and journal history
-- contribute to the global optimizer
-
-### Mock machine
-
-- scan public candles and tickers
-- simulate entries, exits, take-profit, and stop-loss
-- verify strategy logic without real capital risk
-- contribute simulated learning data through journals
-
-### Demo machine
-
-- connect to the OKX sandbox/demo environment
-- place demo orders without touching real funds
-- read demo account and position state from OKX
-- contribute demo execution history to the global journal
-
-The top-right runtime badge on the dashboard now shows `mock / demo / live / auto` so you can tell the mode at a glance.
-
-## Update flow
-
-If the repo is already cloned on a machine:
+If already cloned:
 
 ```bash
 git pull origin codex/upload-current-bot
+cd harmonic_agent
 ```
 
-If you want a fresh download:
-
-- ZIP: [https://github.com/apple5953/OKX/archive/refs/heads/codex/upload-current-bot.zip](https://github.com/apple5953/OKX/archive/refs/heads/codex/upload-current-bot.zip)
-
-## Move Main Bot To Mac Mini
-
-If you move the main bot from Windows to a Mac mini, copy the repo folder and rebuild only the machine-specific runtime pieces.
-
-Bring these files with you:
-
-- the full `harmonic_agent` repository folder
-- the current `journal_<NODE_NAME>.json` if you want to keep the same node history
-- the current `active_trades_<NODE_NAME>.json` if you want to keep the same active UI snapshot
-- any backup folder you want to archive from `backups/`
-- your OKX credentials from environment variables or your local OKX profile config
-
-Do not rely on these as the primary source of truth:
-
-- `trade_journal.json`
-- `active_trades.json`
-
-Mac mini setup order:
-
-1. Install Python 3.12+ and Git if they are not already available.
-2. Copy the repo to the Mac mini.
-3. Set a unique `OKX_NODE_NAME` for the Mac mini, for example `macmini_main`.
-4. Set the run mode you want:
-   - `mock` for local simulation
-   - `demo` for OKX sandbox/demo
-   - `live` only on the primary machine with the right whitelist and permissions
-5. If this is a brand new machine, do a zero-start first.
-6. Start the bot with `bash run_bot.sh` or `OKX_RUN_MODE=demo bash run_bot.sh`.
-7. The dashboard UI will open automatically at `http://127.0.0.1:5000`.
-
-For an easier first launch, you can use:
-
-```powershell
-start-main.bat macmini_main demo
-```
-
-or on Mac/Linux:
+3. Set a unique node and first run in mock.
 
 ```bash
-./start-main.sh macmini_main demo
+export OKX_NODE_NAME=macmini_02
+export OKX_RUN_MODE=mock
+export OKX_OPEN_UI=1
 ```
 
-If you want a fresh start on the Mac mini, use:
+4. Initialize clean local training state.
 
 ```bash
-export OKX_NODE_NAME=macmini_main
+./scripts/bootstrap-zero-start.sh macmini_02 mock
+```
+
+5. Start normally after zero-start.
+
+```bash
+./start-main.sh macmini_02 mock
+```
+
+6. Open the UI.
+
+```text
+http://127.0.0.1:5000
+```
+
+7. Verify UI health.
+
+Check that the UI shows:
+
+- Market radar is updating
+- Four mode cards are visible
+- Health check is not blank
+- Candidate count changes over time
+- Journal file exists for the Mac node
+
+8. Only after mock verification, switch to demo if desired.
+
+```bash
 export OKX_RUN_MODE=demo
-./scripts/bootstrap-zero-start.sh macmini_main
+./start-main.sh macmini_02 demo
 ```
 
-If you want to preserve the old history instead, copy the node-specific journal files before the first launch and keep the same `OKX_NODE_NAME`.
+Before demo auto-ordering, confirm Windows is not also auto-ordering on the same OKX demo account.
 
-## Files to know
+---
 
-- `server_core/config.py` - node name, run mode, and file paths
-- `server.py` - local boot/load logic
-- `scripts/bootstrap-zero-start.ps1` - Windows zero-start bootstrap
-- `scripts/bootstrap-zero-start.sh` - macOS/Linux zero-start bootstrap
-- `scripts/set-node-name.ps1` - PowerShell node-name setter
-- `scripts/set-run-mode.ps1` - PowerShell run-mode setter
-- `set-node-name.bat` - Windows node-name setter
-- `set-run-mode.bat` - Windows run-mode setter
-- `run-demo.bat` - Windows demo launcher
-- `run-zero-start.bat` - Windows zero-start launcher
-- `.github/workflows/optimize.yml` - global optimization and commit
-- `optimize_global.py` - merges all node journals and builds the optimizer
+## OKX Credentials On Mac Mini
 
-## Submission rules
+The robot can read OKX credentials from environment variables:
 
-- Do not commit `active_trades_*.json`.
-- Commit `journal_*.json` only.
-- Keep one unique node name per machine.
-- Set `OKX_RUN_MODE=mock` on secondary machines if you want them locked to simulation.
-- Set `OKX_RUN_MODE=demo` on the main OKX sandbox/demo machine.
-- Do not reuse the same node name on different computers.
+```bash
+export OKX_API_KEY="..."
+export OKX_API_SECRET="..."
+export OKX_PASSPHRASE="..."
+export OKX_RUN_MODE=demo
+```
 
-## Troubleshooting
+It can also read an OKX profile from:
 
-- If a machine should be mock but starts trying to behave like live, set `OKX_RUN_MODE=mock` and restart.
-- If a machine should use OKX sandbox/demo, set `OKX_RUN_MODE=demo` and restart.
-- If a machine must be live, confirm its OKX API key and whitelist first.
-- If the journals look polluted, run zero-start again so the machine starts from an empty local history.
+```text
+~/.okx/config.toml
+```
 
-## Quick mode switching
+The config loader supports profile fields such as:
 
-- Mock only: `run-mock.bat`
-- Demo mode: `run-demo.bat`
-- Live preferred: `run-live.bat`
-- Zero-start with a mode: `run-zero-start.bat macmini_02 demo`
-- Normal launch with a mode: `run_bot.bat mock`, `run_bot.bat demo`, or `run_bot.bat live`
-- One-click main launcher: `start-main.bat` or `start-main.sh`
+- `api_key`
+- `secret_key`
+- `passphrase`
+- `demo`
+- `site`
+
+If `demo=true`, the robot resolves run mode as demo unless another explicit mode is provided.
+
+Security rules:
+
+- Never commit credentials.
+- Never paste credentials into README.
+- Never push `auth_token.json`.
+- Prefer OKX API keys restricted to demo/sandbox for training.
+
+---
+
+## Multi-Node Training Policy
+
+Each machine writes its own state:
+
+```text
+journal_<NODE_NAME>.json
+active_trades_<NODE_NAME>.json
+zero_start_state_<NODE_NAME>.json
+account_session_baseline_<NODE_NAME>.json
+```
+
+Training aggregation should use journals, not active state.
+
+Safe to review or merge intentionally:
+
+- `journal_macmini_02.json`
+
+Usually unsafe to merge:
+
+- `active_trades_macmini_02.json`
+- `zero_start_state_macmini_02.json`
+- `account_session_baseline_macmini_02.json`
+- `optimization_cycle_state.json`
+- `global_optimizer.json` unless the optimizer update is intentional and reviewed
+
+Git rules already ignore most local runtime files, but an AI agent must still inspect `git status --short` before staging.
+
+---
+
+## Current Profitability Status
+
+The robot should be treated as a training system, not as a proven stable-profit system.
+
+As of the latest local review on `2026-07-19`:
+
+- `MacroSniper` had negative expectancy and was limited to training probe behavior.
+- `SqueezeHunter` had negative expectancy and was limited to training probe behavior.
+- `MeanReversion` had too few samples to prove stability.
+- `Contrarian` had insufficient or zero effective samples.
+
+This means the Mac mini should help collect clean samples. It should not be used to increase live risk.
+
+Minimum evidence needed before calling a mode stable:
+
+- At least `30` verified learnable closed trades per mode
+- Positive expectancy
+- Profit factor above the configured threshold
+- Acceptable drawdown
+- No large TP/SL protection failures
+- No pollution from manual, recovered, mixed, or version-mismatch trades
+
+---
+
+## UI Validation Checklist
+
+After the robot starts, verify:
+
+- `/api/trades` returns HTTP 200
+- UI loads at `http://127.0.0.1:5000`
+- Browser console has no JavaScript errors
+- Account equity, active PnL, and four-mode closed PnL are clearly separated
+- Market radar has candidates or clear block reasons
+- Mode cards show sample count, win rate, PF, expectancy, and training probe status
+- Health panel is populated
+- Active positions show TP/SL or protection status
+
+If UI is blank:
+
+1. Check port `5000`.
+2. Check terminal logs.
+3. Check Python dependencies.
+4. Check OKX credentials if running demo.
+5. Re-open `http://127.0.0.1:5000`.
+
+---
+
+## Technical Risks On Mac Mini
+
+| Risk | Severity | Why It Matters | Mitigation |
+| --- | --- | --- | --- |
+| Same OKX account runs on Windows and Mac | Critical | duplicate entries, TP/SL conflicts, polluted attribution | only one demo auto-order node at a time |
+| Same `OKX_NODE_NAME` reused | Critical | journal and active state overwrite each other | unique node per physical machine |
+| Copying active state from Windows | Critical | protection order IDs and lifecycle IDs do not belong to Mac | zero-start on Mac |
+| macOS port 5000 conflict | High | UI may fail to start | check AirPlay Receiver or add configurable port |
+| Windows-only OKX CLI fallback | Medium/High | fallback balance/position recovery can fail on Mac | use REST path or patch CLI resolver |
+| Unpinned Python packages | Medium | future ccxt/pandas changes can alter behavior | add requirements lock for long training |
+| Mac sleep | Medium | scanner and TP/SL monitor pause | use `caffeinate` or disable sleep |
+| OKX rate limit | Medium | two nodes scanning with same key may hit limits | avoid duplicate demo nodes, reduce scan loop |
+| Dirty git worktree | Medium | runtime data may be committed accidentally | stage only intended source/docs |
+
+---
+
+## Recommended Mac Mini First-Day Procedure
+
+1. Pull latest repository.
+2. Set `OKX_NODE_NAME=macmini_02`.
+3. Start in `mock`.
+4. Run zero-start.
+5. Verify UI and radar for 15-30 minutes.
+6. Confirm no console errors.
+7. Confirm `journal_macmini_02.json` exists.
+8. Stop Windows demo auto-order if Mac will take over demo.
+9. Start Mac in `demo`.
+10. Watch the first few candidates and active positions.
+11. Confirm every active position has protection.
+12. Commit only the Mac journal when intentionally contributing training data.
+
+---
+
+## Commands Reference
+
+Start mock training:
+
+```bash
+export OKX_NODE_NAME=macmini_02
+export OKX_RUN_MODE=mock
+./start-main.sh macmini_02 mock
+```
+
+Start demo training:
+
+```bash
+export OKX_NODE_NAME=macmini_02
+export OKX_RUN_MODE=demo
+./start-main.sh macmini_02 demo
+```
+
+Start without auto-opening UI:
+
+```bash
+export OKX_OPEN_UI=0
+./start-main.sh macmini_02 mock
+```
+
+Keep Mac awake for a session:
+
+```bash
+caffeinate -dimsu ./start-main.sh macmini_02 demo
+```
+
+Inspect local API:
+
+```bash
+curl http://127.0.0.1:5000/api/trades
+```
+
+Inspect git before committing:
+
+```bash
+git status --short
+```
+
+---
+
+## AI Agent Handoff Prompt For Mac Mini
+
+Use this prompt when asking an AI agent on Mac mini to install or verify the robot:
+
+```text
+You are helping install OKX Harmonic Trading Agent V13 on a Mac mini.
+Do not run live mode.
+Do not reuse a Windows node name.
+Use a new OKX_NODE_NAME such as macmini_02.
+Start in mock mode first.
+Run zero-start before first launch.
+Do not copy active_trades from Windows.
+Do not commit active_trades, credentials, .deps, screenshots, or logs.
+Check whether port 5000 is occupied by macOS AirPlay.
+Verify http://127.0.0.1:5000 and /api/trades.
+Only after mock UI and health checks are normal, ask before switching to OKX demo auto-ordering.
+If demo mode is enabled, confirm no other machine is auto-ordering on the same OKX demo account.
+Report exact files changed and exact validation commands.
+```
+
+---
+
+## Files To Know
+
+- `server.py` - main local server and four strategy thread startup
+- `server_core/config.py` - node name, run mode, scan limits, training probe settings
+- `server_core/engine.py` - strategy scan and execution loop
+- `server_core/market_router.py` - market regime routing
+- `server_core/okx_client.py` - OKX REST client and local snapshots
+- `server_core/strategies.py` - performance, optimizer, mode logic
+- `server_core/web_server.py` - UI/API endpoints
+- `ui/index.html` - dashboard shell
+- `ui/app.js` - main UI logic
+- `ui/app-v13-canonical.js` - V13 UI consistency overrides
+- `run_bot.sh` - Mac/Linux launcher
+- `start-main.sh` - Mac/Linux guarded launcher
+- `scripts/bootstrap-zero-start.sh` - Mac/Linux zero-start
+- `macmini_deployment_guide.md` - shorter deployment notes
+
+---
+
+## Summary
+
+Mac mini training is technically feasible with the same strategy generation, but it must be treated as a separate training node. The safe path is mock first, zero-start, unique node name, UI/API verification, then demo only if no other machine is controlling the same OKX account.

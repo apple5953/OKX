@@ -1,4 +1,5 @@
 __pycache__/
+.deps/
 *.pyc
 *.pyo
 *.pyd
@@ -25,10 +26,13 @@ api_output.json
 *.bad-*
 *.pre-growth-repair.bak
 auth_token.json
+account_session_baseline_*.json
 active_trades_*.json
+active_trades_*.json.*
 active_trades.json
 zero_start_state_*.json
 optimization_cycle_state.json
+ui-audit*.png
 analyze_journal.py
 check_bluai_market.py
 clean_bluai_all.py
