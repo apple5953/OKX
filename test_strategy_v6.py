@@ -4,6 +4,15 @@ from unittest.mock import patch
 import pandas as pd
 
 import server
+from server_core.engine import active_unprotected_trades, build_live_trade_snapshot
+from server_core.execution import (
+    _algo_has_take_profit_and_stop_loss,
+    _algo_identifier_matches,
+    protection_algos_cover_size,
+)
+from server_core.okx_client import _build_scan_universe_from_tickers
+from server_core.strategies import strategy_category_permission
+from server_core.utils import has_valid_protection
 
 
 def sample_frame(count=60, start=100.0):
@@ -96,6 +105,26 @@ class StrategyV6Tests(unittest.TestCase):
         self.assertFalse(server.is_crypto_usdt_swap(stable))
         self.assertFalse(server.is_crypto_usdt_swap(usdc_settled))
 
+    def test_strategy_category_permission_returns_flat_tuple(self):
+        allowed, reason = strategy_category_permission('SqueezeHunter', 'Squeeze Watch')
+        self.assertTrue(allowed)
+        self.assertEqual(reason, '')
+
+        allowed, reason = strategy_category_permission('SqueezeHunter', 'High Volume')
+        self.assertFalse(allowed)
+        self.assertIsInstance(reason, str)
+
+    def test_scan_universe_builds_top_usdt_swaps_by_volume(self):
+        tickers = [
+            {'symbol': 'LOW/USDT:USDT', 'quoteVolume': 10, 'percentage': 0, 'high': 1.1, 'low': 1.0},
+            {'symbol': 'BTC/USDT:USDT', 'quoteVolume': 500, 'percentage': 1, 'high': 2.0, 'low': 1.9},
+            {'symbol': 'HOT/USDT:USDT', 'quoteVolume': 300, 'percentage': 8, 'high': 1.3, 'low': 1.0},
+        ]
+        symbols, categories = _build_scan_universe_from_tickers(tickers, {}, limit=2)
+        self.assertEqual(symbols, ['BTC/USDT:USDT', 'HOT/USDT:USDT'])
+        self.assertEqual(categories['BTC/USDT:USDT'], 'Majors')
+        self.assertEqual(categories['HOT/USDT:USDT'], 'Alpha Rel. Strength')
+
     def test_symbol_reservation_blocks_cross_mode_race(self):
         old_active = list(server.active_trades)
         old_reserved = set(server.reserved_symbols)
@@ -115,6 +144,114 @@ class StrategyV6Tests(unittest.TestCase):
             server.active_trades = old_active
             server.reserved_symbols.clear()
             server.reserved_symbols.update(old_reserved)
+
+    def test_stale_missing_position_does_not_block_new_entries(self):
+        old_active = list(server.active_trades)
+        old_reserved = set(server.reserved_symbols)
+        try:
+            server.active_trades = [{
+                'status': 'active',
+                'symbol': 'NOTUSDT',
+                'direction': 'long',
+                'protection_status': 'failed',
+                'sync_status': 'awaiting exact OKX close lifecycle',
+                'sl': 0,
+                'tp1': 0,
+            }]
+            server.reserved_symbols.clear()
+            blocked = active_unprotected_trades()
+            self.assertEqual(blocked, [])
+            reserved, key = server.reserve_symbol_for_entry('NOT-USDT-SWAP')
+            self.assertTrue(reserved, key)
+            server.release_symbol_reservation(key)
+        finally:
+            server.active_trades = old_active
+            server.reserved_symbols.clear()
+            server.reserved_symbols.update(old_reserved)
+
+    def test_confirmed_without_exchange_verification_is_not_protected(self):
+        old_active = list(server.active_trades)
+        try:
+            trade = {
+                'status': 'active',
+                'symbol': 'BTCUSDT',
+                'direction': 'long',
+                'protection_status': 'confirmed',
+                'sl': 99.0,
+                'tp1': 101.0,
+                'exchange_protection_verified': False,
+            }
+            server.active_trades = [dict(trade)]
+            self.assertFalse(has_valid_protection(trade))
+            self.assertEqual(len(active_unprotected_trades()), 1)
+            trade['exchange_protection_verified'] = True
+            server.active_trades = [dict(trade)]
+            self.assertTrue(has_valid_protection(trade))
+            self.assertEqual(active_unprotected_trades(), [])
+        finally:
+            server.active_trades = old_active
+
+    def test_live_snapshot_does_not_copy_unverified_local_tpsl(self):
+        tracked = [{
+            'status': 'active',
+            'symbol': 'BTCUSDT',
+            'instId': 'BTC-USDT-SWAP',
+            'direction': 'long',
+            'strategy': 'MacroSniper',
+            'protection_status': 'confirmed',
+            'sl': 99.0,
+            'tp1': 101.0,
+            'exchange_protection_verified': False,
+        }]
+        live_positions = [{
+            'symbol': 'BTCUSDT',
+            'instId': 'BTC-USDT-SWAP',
+            'direction': 'long',
+            'side': 'long',
+            'entry': 100.0,
+            'entryPrice': 100.0,
+            'markPrice': 100.5,
+            'contracts': 1.0,
+            'info': {'instId': 'BTC-USDT-SWAP'},
+        }]
+        rows = build_live_trade_snapshot(
+            tracked_records=tracked,
+            live_positions=live_positions,
+            include_potentials=False,
+        )
+        self.assertEqual(rows[0]['protection_status'], 'unconfirmed')
+        self.assertNotEqual(rows[0].get('tp1'), 101.0)
+        self.assertNotEqual(rows[0].get('sl'), 99.0)
+
+    def test_protection_verification_requires_both_tp_and_sl(self):
+        self.assertFalse(_algo_has_take_profit_and_stop_loss({'tpTriggerPx': '1.2'}))
+        self.assertFalse(_algo_has_take_profit_and_stop_loss({'slTriggerPx': '0.9'}))
+        self.assertTrue(_algo_has_take_profit_and_stop_loss({
+            'tpTriggerPx': '1.2',
+            'slTriggerPx': '0.9',
+        }))
+        self.assertTrue(_algo_has_take_profit_and_stop_loss({
+            'linkedAlgoOrd': {'tpTriggerPx': '1.2', 'slTriggerPx': '0.9'},
+        }))
+
+    def test_protection_verification_matches_algo_or_client_id(self):
+        algo = {
+            'algoId': 'algo-1',
+            'algoClOrdId': 'client-1',
+            'linkedAlgoOrd': {'algoId': 'linked-1'},
+        }
+        self.assertTrue(_algo_identifier_matches(algo, {'algo-1'}))
+        self.assertTrue(_algo_identifier_matches(algo, {'client-1'}))
+        self.assertTrue(_algo_identifier_matches(algo, {'linked-1'}))
+        self.assertFalse(_algo_identifier_matches(algo, {'other'}))
+
+    def test_protection_verification_requires_size_coverage(self):
+        algos = [
+            {'sz': '4', 'tpTriggerPx': '1.2', 'slTriggerPx': '0.9'},
+            {'sz': '3', 'tpTriggerPx': '1.2', 'slTriggerPx': '0.9'},
+        ]
+        self.assertFalse(protection_algos_cover_size(algos, 10))
+        self.assertTrue(protection_algos_cover_size(algos, 7))
 
     def test_expected_edge_rejects_fee_flip_target(self):
         quality = {'exit_slippage_pct': 0.00025}
@@ -176,6 +313,38 @@ class StrategyV6Tests(unittest.TestCase):
             server.trade_journal = old_journal
             server.active_trades = old_active
 
+    def test_lifecycle_match_prefers_closer_entry_when_posid_is_reused(self):
+        old_journal = list(server.trade_journal)
+        old_active = list(server.active_trades)
+        try:
+            server.active_trades = []
+            server.trade_journal = [
+                {
+                    'posId': 'ETH-USDT-SWAP', 'instId': 'ETH-USDT-SWAP',
+                    'direction': 'short', 'strategy': 'SqueezeHunter',
+                    'entry': 1800.0, 'opened_at': '2026-06-30T00:00:00+00:00',
+                },
+                {
+                    'posId': 'ETH-USDT-SWAP', 'instId': 'ETH-USDT-SWAP',
+                    'direction': 'short', 'strategy': 'MeanReversion',
+                    'entry': 1881.0, 'opened_at': '2026-06-30T00:03:00+00:00',
+                },
+            ]
+            record = {
+                'id': 'ETH-USDT-SWAP',
+                'openPrice': 1880.96,
+                'info': {
+                    'posId': 'ETH-USDT-SWAP', 'instId': 'ETH-USDT-SWAP',
+                    'direction': 'short', 'openAvgPx': '1880.96',
+                    'cTime': str(server.timestamp_ms('2026-06-30T00:04:00+00:00')),
+                },
+            }
+            matched = server.lifecycle_trade_for_history(record)
+            self.assertEqual(matched['strategy'], 'MeanReversion')
+        finally:
+            server.trade_journal = old_journal
+            server.active_trades = old_active
+
     def test_accounting_quarantines_loss_outside_lifecycle_envelope(self):
         lifecycle = {
             'entry': 0.809,
@@ -202,6 +371,21 @@ class StrategyV6Tests(unittest.TestCase):
             'max_planned_loss_usdt': 18.0,
         }
         record = {'realizedPnl': -12.0, 'openPrice': 100.0, 'closePrice': 97.8}
+        result = server.assess_accounting_record(record, lifecycle)
+        self.assertEqual(result['accounting_status'], 'verified')
+        self.assertTrue(result['eligible_for_learning'])
+
+    def test_accounting_allows_average_entry_drift_inside_risk_envelope(self):
+        lifecycle = {
+            'entry': 100.0,
+            'sl': 98.0,
+            'original_sl_dist': 2.0,
+            'direction': 'long',
+            'max_planned_loss_usdt': 18.0,
+            'strategy': 'MeanReversion',
+            'protection_status': 'confirmed',
+        }
+        record = {'realizedPnl': -8.0, 'openPrice': 103.5, 'closePrice': 99.2}
         result = server.assess_accounting_record(record, lifecycle)
         self.assertEqual(result['accounting_status'], 'verified')
         self.assertTrue(result['eligible_for_learning'])

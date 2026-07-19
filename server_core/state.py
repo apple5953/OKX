@@ -7,9 +7,13 @@ exchange_history_synced_at = 0.0
 exchange_history_error = None
 exchange_history_lock = threading.Lock()
 execution_state_lock = threading.RLock()
+entry_execution_lock = threading.Lock()
 reserved_symbols = set()
+safety_halt_reason = None
+safety_halt_at = 0.0
 global_symbol_cooldowns = {}
 global_executed_signal_candles = {}
+strategy_scan_cursors = {}
 tuning_log_state = {}
 
 market_data_cache = {}
@@ -60,6 +64,16 @@ trade_id_counter = 1
 # Scanner symbols and categories
 global_symbols = []
 global_symbol_categories = {}
+market_universe_source = 'init'
+market_universe_updated_at = None
+market_universe_refresh_seconds = 3600
+market_universe_limit = 100
+market_universe_error = None
+strategy_radar_status = {}
+market_router_cache = {}
+market_mode_ownership = {}
+market_router_events = []
+market_router_lock = threading.RLock()
 instance_guard_socket = None
 
 # Current synced account data

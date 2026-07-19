@@ -5,22 +5,86 @@ let profiles = {};
 let strategyStats = {};
 let performanceData = {};
 let optimizerData = {};
-let sessionStrategyStats = {};
-let sessionPerformanceData = {};
-let sessionOptimizerData = {};
-let sessionReportData = { live_modes: [], weak_modes: [] };
 let accountData = {};
 let reportData = {};
 let healthCheckData = {};
+let entryEfficiencyData = {};
+let uiMetricsData = {};
+let marketRouterData = {};
 let runtimeStatus = {};
 let currentStrategyFilter = 'All';
 let latestRegime = 'ranging';
 let currentStrategyVersion = 'v13';
 let dashboardSnapshotAt = '';
 let dashboardCapital = {};
+const DASHBOARD_SOURCES = Object.freeze({
+    trades: '/api/trades',
+    health: '/api/health-check',
+});
+
+let dashboardSourceState = {
+    trades: DASHBOARD_SOURCES.trades,
+    health: DASHBOARD_SOURCES.health,
+    snapshotAt: '',
+};
 
 const START_EQUITY = 5000;
 const TARGET_EQUITY = 10000;
+
+function requestJson(path, options = {}) {
+    const requestUrl = new URL(path, window.location.origin).toString();
+    const requestOptions = {
+        method: options.method || 'GET',
+        headers: { ...(options.headers || {}) },
+        body: options.body,
+        cache: options.cache || 'no-store',
+        credentials: options.credentials || 'same-origin',
+    };
+
+    if (typeof window.fetch === 'function') {
+        return window.fetch(requestUrl, requestOptions);
+    }
+
+    return new Promise((resolve, reject) => {
+        try {
+            const xhr = new XMLHttpRequest();
+            xhr.open(requestOptions.method, requestUrl, true);
+            if (requestOptions.credentials === 'include') {
+                xhr.withCredentials = true;
+            }
+            Object.entries(requestOptions.headers).forEach(([key, value]) => {
+                xhr.setRequestHeader(key, String(value));
+            });
+            xhr.onreadystatechange = () => {
+                if (xhr.readyState !== 4) return;
+                resolve({
+                    ok: xhr.status >= 200 && xhr.status < 300,
+                    status: xhr.status,
+                    async json() {
+                        const raw = xhr.responseText || 'null';
+                        try {
+                            return JSON.parse(raw);
+                        } catch {
+                            return { raw };
+                        }
+                    },
+                    async text() {
+                        return xhr.responseText || '';
+                    },
+                    headers: {
+                        get(name) {
+                            return xhr.getResponseHeader(name);
+                        },
+                    },
+                });
+            };
+            xhr.onerror = () => reject(new TypeError('Network request failed'));
+            xhr.send(requestOptions.body ?? null);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
 
 const text = {
     all: '\u5168\u90e8',
@@ -155,6 +219,14 @@ const labelMap = [
 function zhReason(value) {
     if (!value) return text.ready;
     const raw = String(value);
+    if (raw.includes('Scanning')) return '\u6383\u63cf\u4e2d';
+    if (raw.includes('PRZ breakout')) {
+        const nearMatch = raw.match(/near\s+([0-9.eE+-]+)/);
+        return nearMatch
+            ? `PRZ \u7a81\u7834\u89c0\u5bdf\uff0c\u95dc\u9375\u50f9 ${nearMatch[1]}`
+            : 'PRZ \u7a81\u7834\u89c0\u5bdf';
+    }
+    if (raw.includes('PRZ')) return '\u7b49\u5f85\u9032\u5165 PRZ \u5340\u57df / \u5c1a\u672a\u5f62\u6210\u958b\u55ae\u9ede';
     if (raw.startsWith('training rehab waiting: needs RR >=')) {
         return raw
             .replace('training rehab waiting: needs RR >=', '\u8a13\u7df4\u689d\u4ef6\u672a\u9054\u6a19\uff1a\u9700\u8981 RR >=')
@@ -203,9 +275,13 @@ function protectionLabelV2(trade) {
     const stage = String(trade?.trailing_stage || '').toLowerCase();
     const errorText = zhReason(trade?.protection_error);
     const checks = Number(trade?.missing_protection_checks || 0);
+    const exchangeVerified = trade?.exchange_protection_verified === true || String(trade?.exchange_protection_verified || '').toLowerCase() === 'true';
 
     if (protectionLooksAlreadyClosed(trade)) {
         return '保護單未回報，但倉位已不存在';
+    }
+    if (status === 'confirmed' && !exchangeVerified && trade?.status === 'active') {
+        return 'OKX 保護單未驗證';
     }
     if (status === 'confirmed' && stage === 'protection_failed') {
         return '保護單已確認，先前同步異常已自動收斂';
@@ -300,6 +376,75 @@ function optimizerLine(opt) {
     return `\u81ea\u52d5\u8abf\u53c3: ${optimizerLabel(opt)} / \u9032\u5834x${num(opt.tolerance_mult, 2)} / RRx${num(opt.target_rr_mult, 2)} / \u51b7\u537bx${num(opt.cooldown_mult, 2)}`;
 }
 
+function sourceLabelText(source, snapshotAt = '') {
+    const label = String(source || '-').trim();
+    const snapshot = snapshotAt ? `｜${snapshotAt}` : '';
+    return `來源：${label}${snapshot}`;
+}
+
+function setTextIfExists(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
+function setMetricSource(id, value) {
+    const target = document.getElementById(id);
+    if (!target) return;
+    const text = value || '來源：-';
+    let sourceEl = target.nextElementSibling;
+    if (!sourceEl || !sourceEl.classList || !sourceEl.classList.contains('metric-source')) {
+        sourceEl = document.createElement('small');
+        sourceEl.className = 'metric-source';
+        target.insertAdjacentElement('afterend', sourceEl);
+    }
+    sourceEl.textContent = text;
+    sourceEl.title = text;
+}
+
+function setSourceBadge(id, source, snapshotAt = '', title = '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const label = sourceLabelText(source, snapshotAt);
+    el.textContent = label;
+    el.title = title || label;
+}
+
+function refreshSourceBadges() {
+    const snapshotAt = dashboardSourceState.snapshotAt || dashboardSnapshotAt || reportData?.server_time || healthCheckData?.generated_at || '-';
+    const liveTitle = `來源：OKX / 活倉快照｜${DASHBOARD_SOURCES.trades}｜${snapshotAt}`;
+    const healthTitle = `來源：OKX / 健康檢查｜${DASHBOARD_SOURCES.health}｜${snapshotAt}`;
+    const ensureBadge = ({ sectionTitle, badgeId, source, title }) => {
+        const section = Array.from(document.querySelectorAll('section')).find((item) => {
+            const heading = item.querySelector('.panel-head h2');
+            return heading && heading.textContent.trim() === sectionTitle;
+        });
+        if (!section) return;
+        const head = section.querySelector('.panel-head');
+        if (!head) return;
+        let badge = document.getElementById(badgeId);
+        if (!badge || badge.parentElement !== head) {
+            if (badge && badge.parentElement) {
+                badge.remove();
+            }
+            badge = document.createElement('span');
+            badge.id = badgeId;
+            badge.className = 'source-pill';
+            head.appendChild(badge);
+        }
+        setSourceBadge(badgeId, source, snapshotAt, title);
+    };
+    [
+        { sectionTitle: '引擎即時狀態', badgeId: 'engine-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: '機器人即時報告', badgeId: 'report-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: 'V13 健康檢查', badgeId: 'health-source', source: DASHBOARD_SOURCES.health, title: healthTitle },
+        { sectionTitle: '模式控制台', badgeId: 'modes-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: '盈利驗證 / 復健學習', badgeId: 'performance-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: '目前倉位', badgeId: 'trades-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: '市場雷達', badgeId: 'radar-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+        { sectionTitle: '已平倉紀錄', badgeId: 'history-source', source: DASHBOARD_SOURCES.trades, title: liveTitle },
+    ].forEach(ensureBadge);
+}
+
 function modeTierLabel(tier) {
     if (tier === 'live_core') return '核心實戰';
     if (tier === 'live_calibration') return '校準實戰';
@@ -307,12 +452,8 @@ function modeTierLabel(tier) {
 }
 
 function getUnifiedReportModes() {
-    const liveModes = Array.isArray(reportData?.live_modes) && reportData.live_modes.length
-        ? reportData.live_modes
-        : (Array.isArray(sessionReportData?.live_modes) ? sessionReportData.live_modes : []);
-    const weakModes = Array.isArray(reportData?.weak_modes) && reportData.weak_modes.length
-        ? reportData.weak_modes
-        : (Array.isArray(sessionReportData?.weak_modes) ? sessionReportData.weak_modes : []);
+    const liveModes = Array.isArray(reportData?.live_modes) ? reportData.live_modes : [];
+    const weakModes = Array.isArray(reportData?.weak_modes) ? reportData.weak_modes : [];
     return { liveModes, weakModes };
 }
 
@@ -321,20 +462,29 @@ function getUnifiedReportMetrics() {
     const activeTrades = currentTrades.filter((trade) => trade.status === 'active');
     const potentialTrades = currentTrades.filter((trade) => trade.status === 'potential');
     const report = reportData && typeof reportData === 'object' ? reportData : {};
+    const capitalUnrealized = Number(
+        capital.strategy_unrealized ??
+        report.active_pnl ??
+        activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
+    );
     return {
         activeCount: Number(report.active_count ?? activeTrades.length ?? 0),
         potentialCount: Number(report.potential_count ?? potentialTrades.length ?? 0),
-        activePnl: Number(report.active_pnl ?? activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)),
+        activePnl: capitalUnrealized,
         sessionActiveCount: Number(report.session_active_count ?? 0),
         sessionPotentialCount: Number(report.session_potential_count ?? 0),
         sessionActivePnl: Number(report.session_active_pnl ?? 0),
         sessionRealizedPnl: Number(report.session_realized_pnl ?? 0),
+        activePnlSource: capital.strategy_unrealized_source || report.active_pnl_source || 'OKX / 活倉快照',
+        sessionActiveSource: report.session_active_pnl_source || 'OKX / 活倉快照',
+        sessionRealizedSource: report.session_realized_pnl_source || '已驗證歷史 / session alphaPnl',
         verdict: report.verdict || '掃描中',
         protectionRule: report.protection_rule || '-',
         serverTime: report.server_time || '-',
         positions: Array.isArray(report.positions) ? report.positions : [],
         trackedPositions: Array.isArray(report.tracked_positions) ? report.tracked_positions : [],
         capital,
+        capitalSource: capital.cumulative_source || capital.pnl_source || 'OKX / 帳戶快照',
     };
 }
 
@@ -639,48 +789,6 @@ function buildSessionOptimizer(perf) {
     };
 }
 
-function refreshSessionMetrics() {
-    const sessionRows = sessionHistoryRows();
-    const sessionPerf = {};
-    const sessionStats = {};
-    const sessionOptimizer = {};
-    const sessionLiveModes = [];
-    const sessionWeakModes = [];
-    MODE_STRATEGIES.forEach((name) => {
-        const rows = sessionRows.filter((row) => rowStrategyName(row) === name);
-        const perf = buildSessionPerformance(rows);
-        const opt = buildSessionOptimizer(perf);
-        sessionPerf[name] = perf;
-        sessionStats[name] = {
-            sample: perf.sample,
-            wins: perf.wins,
-            losses: perf.losses,
-            win_rate: perf.win_rate,
-            pnl: perf.total_pnl,
-            avg_pnl: perf.expectancy,
-            confidence: perf.sample ? Math.max(1, Math.min(2, 0.75 + perf.sample / 25)) : 1,
-        };
-        sessionOptimizer[name] = opt;
-        const item = {
-            strategy: name,
-            label: strategyLabel(name),
-            tier: opt.state === 'exploit' || opt.state === 'steady' ? (perf.verdict === 'scale_up' ? 'live_core' : 'live_calibration') : 'watch',
-            reason: verdictDetail(perf),
-            pf: perf.profit_factor,
-            expectancy: perf.expectancy,
-            max_margin: opt.max_margin,
-            state: opt.state,
-        };
-        if (item.tier === 'live_core' || item.tier === 'live_calibration') sessionLiveModes.push(item);
-        else sessionWeakModes.push(item);
-    });
-    sessionPerformanceData = sessionPerf;
-    sessionStrategyStats = sessionStats;
-    sessionOptimizerData = sessionOptimizer;
-    sessionReportData = { live_modes: sessionLiveModes, weak_modes: sessionWeakModes };
-    return { sessionRows };
-}
-
 function deprecatedUpdateProgressCurve(pnlVal, signedProgress) {
     const maxTargetProgress = Math.max(100, signedProgress);
     const progressRatio = Math.max(0, signedProgress) / maxTargetProgress;
@@ -782,14 +890,14 @@ function buildHealthCheckModel() {
         trainingIssues: Number(counts.training_issues || 0),
     };
     const sessionCounts = {
-        activeTrades: Number(counts.session_active_trades ?? sessionActiveTrades().length),
-        potentialTrades: Number(counts.session_potential_trades ?? sessionPotentialTrades().length),
+        activeTrades: Number(counts.session_active_trades ?? 0),
+        potentialTrades: Number(counts.session_potential_trades ?? 0),
         trainingIssues: Number(counts.session_training_issues ?? 0),
     };
     return { data, counts, liveCounts, sessionCounts };
 }
 
-function renderHealthCheck() {
+function deprecatedRenderHealthCheck() {
     const summary = document.getElementById('health-summary');
     const blocks = document.getElementById('health-blocks');
     const detail = document.getElementById('health-detail');
@@ -917,11 +1025,13 @@ async function fetchHealthCheck() {
     const stateEl = document.getElementById('health-check-state');
     if (stateEl) stateEl.textContent = '重新整理中...';
     try {
-        const response = await fetch('/api/health-check', { cache: 'no-store' });
+        const response = await requestJson('/api/health-check', { cache: 'no-store' });
         if (!response.ok) throw new Error(`API ${response.status}`);
         const data = await response.json();
         healthCheckData = data && typeof data === 'object' ? data : {};
+        dashboardSourceState.snapshotAt = dashboardSourceState.snapshotAt || healthCheckData.generated_at || dashboardSnapshotAt || '';
         renderHealthCheck();
+        refreshSourceBadges();
     } catch (error) {
         console.error('fetchHealthCheck failed', error);
         if (stateEl) stateEl.textContent = '健康檢查失敗';
@@ -956,7 +1066,7 @@ async function fetchHealthCheck() {
     }
 }
 
-function renderBotReport() {
+function deprecatedRenderBotReport() {
     const box = document.getElementById('bot-report');
     if (!box) return;
     const { liveModes, weakModes } = getUnifiedReportModes();
@@ -989,17 +1099,1495 @@ function renderBotReport() {
     `;
 }
 
+function getUnifiedReportMetrics() {
+    const capital = accountData.capital || {};
+    const activeTrades = currentTrades.filter((trade) => trade.status === 'active');
+    const potentialTrades = currentTrades.filter((trade) => trade.status === 'potential');
+    const report = reportData && typeof reportData === 'object' ? reportData : {};
+    const capitalUnrealized = Number(
+        capital.strategy_unrealized ??
+        report.active_pnl ??
+        activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
+    );
+    const capitalSnapshotAvailable = Boolean(capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    return {
+        activeCount: Number(report.active_count ?? activeTrades.length ?? 0),
+        potentialCount: Number(report.potential_count ?? potentialTrades.length ?? 0),
+        activePnl: capitalUnrealized,
+        sessionActiveCount: Number(report.session_active_count ?? 0),
+        sessionPotentialCount: Number(report.session_potential_count ?? 0),
+        sessionActivePnl: Number(report.session_active_pnl ?? 0),
+        sessionRealizedPnl: Number(report.session_realized_pnl ?? 0),
+        activePnlSource: capital.strategy_unrealized_source || report.active_pnl_source || 'OKX / 活倉快照',
+        sessionActiveSource: report.session_active_pnl_source || 'OKX / 活倉快照',
+        sessionRealizedSource: report.session_realized_pnl_source || '已驗證歷史 / session alphaPnl',
+        verdict: report.verdict || '觀察中',
+        protectionRule: report.protection_rule || '-',
+        serverTime: report.server_time || '-',
+        positions: Array.isArray(report.positions) ? report.positions : [],
+        trackedPositions: Array.isArray(report.tracked_positions) ? report.tracked_positions : [],
+        capital,
+        capitalSnapshotAvailable,
+        capitalSource: capital.account_layer_source || capital.cumulative_source || capital.pnl_source || (capitalSnapshotAvailable ? 'OKX / 帳戶快照' : '帳戶快照不可用 / Session 推算'),
+    };
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable ?? capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    const capitalPnl = capitalSnapshotAvailable
+        ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0)
+        : null;
+    const sessionPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.account_layer_source || capital.cumulative_source || 'OKX / 帳戶快照';
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        if (capitalPnl == null || !Number.isFinite(capitalPnl)) {
+            capitalChangeEl.textContent = '--';
+            capitalChangeEl.className = 'value';
+            capitalChangeEl.title = 'OKX 帳戶快照不可用，未以策略推算值冒充帳戶層';
+        } else {
+            capitalChangeEl.textContent = `${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)}`;
+            capitalChangeEl.className = capitalPnl >= 0 ? 'gain' : 'loss';
+            capitalChangeEl.title = `帳戶層來源：${capitalSource}`;
+        }
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧（帳戶層）' : 'V13 累積盈虧（帳戶快照不可用）';
+    setMetricSource('capital-change', capitalSnapshotAvailable ? `來源：${capitalSource}` : '來源：OKX 帳戶快照不可用 / 只顯示 Session 推算');
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (sessionPnl / targetProfitGoal) * 100 : 0);
+    const curvePnl = capitalSnapshotAvailable ? Number(capitalPnl ?? 0) : sessionPnl;
+    updateProgressCurve(curvePnl, signedProgress);
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧曲線（帳戶層）' : 'V13 Session 推算曲線（非帳戶層）';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+}
+
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    const summary = document.getElementById('history-summary');
+    tbody.innerHTML = '';
+    const rows = filtered(historyData).slice(0, 80);
+    const closedTradeTotalPnl = rows.reduce((sum, item) => {
+        const info = item.info || {};
+        return sum + Number(item.realizedPnl || info.realizedPnl || 0);
+    }, 0);
+
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉筆數</span>
+                <strong>${rows.length}</strong>
+            </div>
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${closedTradeTotalPnl >= 0 ? 'gain' : 'loss'}">${signed(closedTradeTotalPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>本頁口徑</span>
+                <strong>只看 closed trades</strong>
+            </div>
+        `;
+    }
+
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+
+    rows.forEach((item) => {
+        const info = item.info || {};
+        const pnl = Number(item.realizedPnl || info.realizedPnl || 0);
+        const fee = Number(item.fee ?? info.fee ?? 0);
+        const funding = Number(item.fundingFee ?? info.fundingFee ?? 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${String(item.symbol || '').replace(':USDT', '')}</strong></td>
+            <td>${directionLabel(item.direction || info.direction)}</td>
+            <td>${strategyLabel(item.strategy)}</td>
+            <td>${info.lever || '-'}x</td>
+            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>手續費 ${signed(fee, 4)} / 資金費 ${signed(funding, 4)}</small></td>
+            <td>${item.timestamp ? new Date(item.timestamp).toLocaleString() : '-'}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderBotReport() {
+    const box = document.getElementById('bot-report');
+    if (!box) return;
+
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const metrics = getUnifiedReportMetrics();
+    const positions = Array.isArray(metrics.positions) ? metrics.positions : [];
+    const trackedPositions = Array.isArray(metrics.trackedPositions) ? metrics.trackedPositions : [];
+    const activeCount = Number(metrics.activeCount || 0);
+    const potentialCount = Number(metrics.potentialCount || 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const sessionActivePnl = Number(metrics.sessionActivePnl || 0);
+    const sessionRealizedPnl = Number(metrics.sessionRealizedPnl || 0);
+    const verdict = zhText(metrics.verdict || '-');
+    const serverTime = metrics.serverTime || '-';
+
+    box.innerHTML = `
+        <div class="health-summary">
+            <div class="health-card">
+                <span>即時狀態</span>
+                <strong class="${activeCount > 0 ? 'warn' : 'good'}">${escapeHtml(verdict)}</strong>
+                <small>${escapeHtml(serverTime)}</small>
+            </div>
+            <div class="health-card">
+                <span>即時持倉</span>
+                <strong class="${activePnl >= 0 ? 'gain' : 'loss'}">${signed(activePnl)}</strong>
+                <small>${activeCount} 個持倉 / ${potentialCount} 個候選</small>
+            </div>
+            <div class="health-card">
+                <span>執行狀態</span>
+                <strong class="${trackedPositions.length > 0 ? 'warning' : 'good'}">${trackedPositions.length} 筆追蹤</strong>
+                <small>Session ${signed(sessionActivePnl)} / 已實現 ${signed(sessionRealizedPnl)}</small>
+            </div>
+            <div class="health-card">
+                <span>模式統計</span>
+                <strong class="${liveModes.length > 0 ? 'gain' : 'loss'}">${liveModes.length} / ${weakModes.length}</strong>
+                <small>實戰 / 觀察</small>
+            </div>
+        </div>
+        <div class="health-blocks">
+            <div class="health-block">
+                <div class="health-block-title">
+                    <strong>即時持倉</strong>
+                    <span>${positions.length} 筆</span>
+                </div>
+                <div class="health-list">
+                    ${renderHealthList(positions.map((p) => ({
+                        symbol: p.symbol,
+                        strategy: p.strategy,
+                        source: p.source,
+                        status: p.status,
+                        category: Number(p.pnl || 0) >= 0 ? 'good' : 'warning',
+                        reasons: [
+                            `${directionLabel(p.direction)} / ${num(p.entry)} → ${num(p.current)}`,
+                            `PnL ${signed(p.pnl)}`,
+                            zhText(p.stage),
+                        ],
+                    })), '即時持倉')}
+                </div>
+            </div>
+            <div class="health-block">
+                <div class="health-block-title">
+                    <strong>模式分配</strong>
+                    <span>${liveModes.length + weakModes.length} 種</span>
+                </div>
+                <div class="health-list">
+                    ${renderHealthList([
+                        ...liveModes.map((m) => ({
+                            symbol: strategyLabel(m.strategy),
+                            strategy: m.strategy,
+                            category: 'good',
+                            reasons: [`${modeTierLabel(m.tier)}`, `PF ${num(m.pf, 3)}`, `Margin ${money(m.max_margin)}`],
+                        })),
+                        ...weakModes.map((m) => ({
+                            symbol: strategyLabel(m.strategy),
+                            strategy: m.strategy,
+                            category: 'warning',
+                            reasons: [`${modeTierLabel(m.tier)}`, `PF ${num(m.pf, 3)}`, `Margin ${money(m.max_margin)}`],
+                        })),
+                    ], '模式分配')}
+                </div>
+            </div>
+        </div>
+        <div class="health-detail-grid">
+            <div class="health-detail-card">
+                <h3>即時狀態</h3>
+                <span class="hint">同一份快照下的持倉與執行方向</span>
+                <div class="health-tags">
+                    <span class="health-tag ${activeCount > 0 ? 'warning' : 'good'}">持倉 ${activeCount}</span>
+                    <span class="health-tag">候選 ${potentialCount}</span>
+                    <span class="health-tag ${activePnl >= 0 ? 'good' : 'warning'}">浮盈 ${signed(activePnl)}</span>
+                    <span class="health-tag">快照 ${escapeHtml(serverTime)}</span>
+                </div>
+                <div class="health-list">
+                    ${renderHealthList(positions, '即時持倉')}
+                </div>
+            </div>
+            <div class="health-detail-card">
+                <h3>訓練統計</h3>
+                <span class="hint">模式分配與 session 計算</span>
+                <div class="health-tags">
+                    <span class="health-tag ${liveModes.length > 0 ? 'good' : 'warning'}">實戰 ${liveModes.length}</span>
+                    <span class="health-tag ${weakModes.length > 0 ? 'warning' : 'good'}">觀察 ${weakModes.length}</span>
+                    <span class="health-tag">Session ${signed(sessionActivePnl)}</span>
+                    <span class="health-tag">已實現 ${signed(sessionRealizedPnl)}</span>
+                </div>
+                <div class="health-list">
+                    ${renderHealthList([
+                        ...liveModes.map((m) => ({
+                            symbol: strategyLabel(m.strategy),
+                            strategy: m.strategy,
+                            category: 'good',
+                            reasons: [`${modeTierLabel(m.tier)}`, `PF ${num(m.pf, 3)}`, `Margin ${money(m.max_margin)}`],
+                        })),
+                        ...weakModes.map((m) => ({
+                            symbol: strategyLabel(m.strategy),
+                            strategy: m.strategy,
+                            category: 'warning',
+                            reasons: [`${modeTierLabel(m.tier)}`, `PF ${num(m.pf, 3)}`, `Margin ${money(m.max_margin)}`],
+                        })),
+                    ], '模式統計')}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// FINAL V13 canonical overrides. These must stay last because this file still
+// contains legacy duplicate renderers above.
+function getUnifiedReportMetrics() {
+    const snap = v13Snapshot();
+    return {
+        activeCount: snap.activeCount,
+        potentialCount: snap.potentialCount,
+        activePnl: snap.activePnl,
+        sessionActiveCount: snap.activeCount,
+        sessionPotentialCount: snap.potentialCount,
+        sessionActivePnl: snap.activePnl,
+        sessionRealizedPnl: snap.modeRealizedPnl,
+        activePnlSource: snap.activePnlSource,
+        sessionActiveSource: snap.activePnlSource,
+        sessionRealizedSource: snap.modeRealizedSource,
+        verdict: snap.verdict,
+        protectionRule: snap.report.protection_rule || '-',
+        serverTime: snap.snapshotAt,
+        positions: Array.isArray(snap.report.positions) ? snap.report.positions : [],
+        trackedPositions: Array.isArray(snap.report.tracked_positions) ? snap.report.tracked_positions : [],
+        capital: snap.capital,
+        capitalSource: snap.equitySource,
+    };
+}
+
 function buildStrategyCardModel(name) {
     const { liveModes, weakModes } = getUnifiedReportModes();
     const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
     const reportMode = reportModes.get(name) || {};
-    const stats = strategyStats[name] || sessionStrategyStats[name] || {};
-    const perf = performanceData[name] || sessionPerformanceData[name] || {};
-    const opt = optimizerData[name] || sessionOptimizerData[name] || {};
+    const stats = strategyStats[name] || {};
+    const perf = performanceData[name] || {};
+    const opt = optimizerData[name] || {};
+    const liveTrades = v13TradesForMode(name, 'active');
+    const candidateTrades = v13TradesForMode(name, 'potential');
+    const livePnl = liveTrades.reduce((sum, trade) => sum + v13Num(trade.pnl, 0), 0);
+    const cumulativePnl = v13ModeRealizedPnl(name);
+    const sample = v13Num(perf.sample ?? perf.total_trades, 0);
+    return {
+        reportMode,
+        stats,
+        perf,
+        opt,
+        liveTrades,
+        candidateTrades,
+        livePnl,
+        cumulativePnl,
+        cumulativePnlSource: '來源：同一快照 performance.total_pnl',
+        winRate: (perf.win_rate == null || sample === 0) ? '-' : pct(perf.win_rate, 1),
+        verdict: perf.verdict || stats.verdict || 'learning',
+        tierLabel: reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch'),
+        reasonText: reportMode.reason || verdictDetail(perf),
+    };
+}
+
+function refreshSourceBadges() {
+    const snap = v13Snapshot();
+    const live = `/api/trades，同步時間：${snap.snapshotAt}`;
+    const health = `/api/health-check，同步時間：${healthCheckData?.generated_at || snap.snapshotAt}`;
+    [
+        ['engine-source', `資料來源口徑：${live}`],
+        ['report-source', `資料來源口徑：${live}`],
+        ['modes-source', `資料來源口徑：${live}`],
+        ['performance-source', `資料來源口徑：${live}`],
+        ['health-source', `資料來源口徑：${health}`],
+    ].forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.textContent = value;
+            el.title = value;
+        }
+    });
+}
+
+function updateOverview() {
+    const snap = v13Snapshot();
+    const targetProfitGoal = Number((snap.capital.target ?? TARGET_EQUITY) - (snap.capital.start ?? START_EQUITY));
+    const signedProgress = targetProfitGoal !== 0 ? (snap.modeRealizedPnl / targetProfitGoal) * 100 : 0;
+    setTextIfExists('total-equity', money(snap.equity));
+    setTextIfExists('usdt-avail', money(snap.available));
+    setTextIfExists('version-pnl-label', 'V13 四模式已平倉合計');
+    setMetricSource('total-equity', snap.equitySource);
+    setMetricSource('usdt-avail', snap.equitySource);
+    setMetricSource('total-profit', snap.activePnlSource);
+    setMetricSource('capital-change', snap.modeRealizedSource);
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${snap.activePnl >= 0 ? '+' : ''}${money(snap.activePnl)}`;
+        pnlEl.className = `value ${snap.activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = snap.activePnlSource;
+    }
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        capitalChangeEl.textContent = `${snap.modeRealizedPnl >= 0 ? '+' : ''}${money(snap.modeRealizedPnl)}`;
+        capitalChangeEl.className = snap.modeRealizedPnl >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = snap.modeRealizedSource;
+    }
+
+    updateProgressCurve(snap.modeRealizedPnl, signedProgress);
+    setTextIfExists('growth-title', 'V13 四模式已平倉盈虧曲線');
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(snap.verdict);
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${snap.activeCount}</span><strong>即時持倉</strong></div>
+            <div><span>${snap.potentialCount}</span><strong>候選訊號</strong></div>
+            <div><span>${money(snap.activePnl)}</span><strong>活倉浮盈</strong></div>
+        `;
+    }
+}
+
+function renderBotReport() {
+    const box = document.getElementById('bot-report');
+    if (!box) return;
+    const snap = v13Snapshot();
+    box.innerHTML = `
+        <div class="health-summary">
+            <div class="health-card"><span>目前狀態</span><strong class="${snap.activeCount > 0 ? 'warn' : 'good'}">${escapeHtml(zhText(snap.verdict))}</strong><small>${escapeHtml(snap.snapshotAt)}</small></div>
+            <div class="health-card"><span>OKX 活倉未實現盈虧</span><strong class="${snap.activePnl >= 0 ? 'gain' : 'loss'}">${signed(snap.activePnl)}</strong><small>${snap.activeCount} 持倉 / ${snap.potentialCount} 候選</small><small class="metric-source">${escapeHtml(snap.activePnlSource)}</small></div>
+            <div class="health-card"><span>四模式已平倉合計</span><strong class="${snap.modeRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(snap.modeRealizedPnl)}</strong><small>只看 V13 已驗證 closed trades</small><small class="metric-source">${escapeHtml(snap.modeRealizedSource)}</small></div>
+            <div class="health-card"><span>資料可信度</span><strong class="good">同一快照</strong><small>/api/trades</small></div>
+        </div>
+    `;
+}
+
+function renderEngineHeartbeat() {
+    const container = document.getElementById('engine-heartbeat');
+    if (!container) return;
+    container.innerHTML = v13Strategies().map((name) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const opt = model.opt || {};
+        const livePnl = Number(model.livePnl || 0);
+        const realizedPnl = Number(model.cumulativePnl || 0);
+        const conf = opt.capital_mult != null ? Number(opt.capital_mult).toFixed(2) : (perf.confidence != null ? Number(perf.confidence).toFixed(2) : '1.00');
+        return `
+            <div class="eng-card">
+                <div class="eng-head"><strong>${escapeHtml(strategyLabel(name))}</strong><span class="eng-verdict">${escapeHtml(verdictLabel(model.verdict || 'learning'))}</span></div>
+                <div class="eng-desc">${escapeHtml(roleText[name] || 'V13 strategy engine')}</div>
+                <div class="eng-stats" style="grid-template-columns: repeat(5, 1fr);">
+                    <div><span>勝率</span><strong>${escapeHtml(model.winRate)}</strong></div>
+                    <div><span>信心</span><strong>${escapeHtml(conf)}x</strong></div>
+                    <div><span>即時持倉</span><strong>${model.liveTrades.length}</strong></div>
+                    <div><span>活倉浮盈</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${signed(livePnl, 1)}U</strong><small class="metric-source">OKX 活倉快照</small></div>
+                    <div><span>已平倉</span><strong class="${realizedPnl >= 0 ? 'gain' : 'loss'}">${signed(realizedPnl, 1)}U</strong><small class="metric-source">performance.total_pnl</small></div>
+                </div>
+                <div class="eng-scan-status">${model.candidateTrades.length > 0 ? `<span class="eng-scanning">候選 ${model.candidateTrades.length} 筆</span>` : `<span class="eng-idle">等待符合條件</span>`}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderModeCards() {
+    const container = document.getElementById('mode-cards');
+    if (!container) return;
+    container.innerHTML = '';
+    v13Strategies().forEach((name) => {
+        const profile = profiles[name] || {};
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const livePnl = Number(model.livePnl || 0);
+        const realizedPnl = Number(model.cumulativePnl || 0);
+        const card = document.createElement('article');
+        card.className = 'mode-card';
+        card.innerHTML = `
+            <div class="mode-card-head"><strong>${escapeHtml(strategyLabel(name))}</strong>${verdictBadge(model.verdict)}</div>
+            <p>${escapeHtml(model.tierLabel || '觀察中')}</p>
+            <div class="mode-stats">
+                <div><span>即時持倉</span><strong class="${model.liveTrades.length > 0 ? 'gain' : ''}">${model.liveTrades.length}</strong></div>
+                <div><span>候選</span><strong>${model.candidateTrades.length}</strong></div>
+                <div><span>活倉浮盈</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}</strong><small class="metric-source">OKX 活倉快照</small></div>
+                <div><span>勝率</span><strong>${escapeHtml(model.winRate)}</strong></div>
+                <div><span>期望值</span><strong class="${v13Num(perf.expectancy, 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>PF</span><strong class="${v13Num(perf.profit_factor, 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
+            </div>
+            <p class="mode-note">${escapeHtml(model.reasonText || '')}</p>
+            <p class="mode-note cumulative-note">已平倉合計：${escapeHtml(signed(realizedPnl, 1))}U <span class="metric-source-inline">來源：performance.total_pnl</span></p>
+            <div class="rule-line">60U x 1.00 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr || '-'}x ATR / TP ${profile.tp_atr || '-'}x ATR</div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+function renderPerformance() {
+    const tbody = document.getElementById('performance-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const metaEl = document.getElementById('performance-metadata');
+    if (metaEl) {
+        const snap = v13Snapshot();
+        metaEl.textContent = `資料來源：/api/trades，同步時間：${snap.snapshotAt}。即時欄位看 OKX 活倉快照；學習欄位看 V13 已驗證 closed trades。`;
+    }
+    const names = v13Strategies().filter((name) => currentStrategyFilter === 'All' || name === currentStrategyFilter);
+    if (!names.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+    names.forEach((name) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const opt = model.opt || {};
+        const livePnl = Number(model.livePnl || 0);
+        const sample = v13Num(perf.sample ?? perf.total_trades, 0);
+        const pf = v13Num(perf.profit_factor, 0);
+        const exp = v13Num(perf.expectancy, 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${escapeHtml(strategyLabel(name))}</strong><small>來源：同一份 /api/trades 快照</small></td>
+            <td>${model.liveTrades.length} / ${model.candidateTrades.length}<small>${escapeHtml(verdictLabel(model.verdict || 'learning'))}</small></td>
+            <td class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}<small>OKX 活倉快照</small></td>
+            <td>${sample} / ${perf.win_rate == null || sample === 0 ? '-' : pct(perf.win_rate, 1)}<small>已驗證 closed trades / 勝率</small></td>
+            <td class="${pf >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</td>
+            <td><span class="gain">${money(perf.avg_win)}</span> / <span class="loss">${money(perf.avg_loss)}</span></td>
+            <td class="${exp >= 0 ? 'gain' : 'loss'}">${money(exp)}</td>
+            <td>${verdictBadge(perf.verdict || model.verdict)}<div style="font-size: 10px; color: #a1a1aa; margin-top: 4px; line-height: 1.3;">optimizer：${escapeHtml(optimizerLabel(opt))}<br>已平倉合計：${escapeHtml(signed(model.cumulativePnl, 1))}U</div></td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+// V13 canonical UI layer.
+// Keep this block at the end of the file so it overrides older duplicate renderers.
+function v13Num(value, fallback = 0) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function v13Strategies() {
+    const ordered = Array.isArray(MODE_STRATEGIES) ? MODE_STRATEGIES : [];
+    const known = new Set(ordered);
+    const extras = Object.keys(profiles || {}).filter((name) => !known.has(name));
+    return [...ordered, ...extras].filter((name) => name && name !== 'Manual' && name !== 'Recovered');
+}
+
+function v13ModeName(item) {
+    try {
+        return normalizedEngineBucket(item);
+    } catch {
+        return item?.strategy || item?.engine || item?.mode || 'Bot';
+    }
+}
+
+function v13ActiveTrades() {
+    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade && trade.status === 'active');
+}
+
+function v13PotentialTrades() {
+    return (Array.isArray(currentTrades) ? currentTrades : []).filter((trade) => trade && trade.status === 'potential');
+}
+
+function v13TradesForMode(name, status) {
+    const rows = status === 'active' ? v13ActiveTrades() : v13PotentialTrades();
+    return rows.filter((trade) => v13ModeName(trade) === name);
+}
+
+function v13ModeRealizedPnl(name) {
+    return v13Num(performanceData?.[name]?.total_pnl, 0);
+}
+
+function v13TotalModeRealizedPnl() {
+    return v13Strategies().reduce((sum, name) => sum + v13ModeRealizedPnl(name), 0);
+}
+
+function v13Snapshot() {
+    const capital = accountData?.capital || dashboardCapital || {};
+    const report = reportData && typeof reportData === 'object' ? reportData : {};
+    const activeTrades = v13ActiveTrades();
+    const potentialTrades = v13PotentialTrades();
+    const activePnl = activeTrades.reduce((sum, trade) => sum + v13Num(trade.pnl, 0), 0);
+    const modeRealizedPnl = v13TotalModeRealizedPnl();
+    const equity = v13Num(capital.equity ?? accountData?.usdtEq ?? accountData?.totalEq ?? 0, 0);
+    const available = v13Num(accountData?.usdtAvail ?? capital.available ?? capital.usdtAvail ?? equity, 0);
+    const snapshotAt = dashboardSnapshotAt || dashboardSourceState?.snapshotAt || report.server_time || '-';
+
+    return {
+        capital,
+        report,
+        activeTrades,
+        potentialTrades,
+        activeCount: activeTrades.length,
+        potentialCount: potentialTrades.length,
+        activePnl,
+        modeRealizedPnl,
+        equity,
+        available,
+        snapshotAt,
+        verdict: report.verdict || (activeTrades.length ? 'running' : 'watch'),
+        activePnlSource: '來源：/api/trades → OKX 活倉快照 → trade.pnl 合計',
+        modeRealizedSource: '來源：/api/trades → performance[四模式].total_pnl 合計',
+        equitySource: `來源：/api/trades → capital.equity (${capital.equity_basis || capital.source || 'OKX USDT 權益'})`,
+    };
+}
+
+function getUnifiedReportMetrics() {
+    const snap = v13Snapshot();
+    return {
+        activeCount: snap.activeCount,
+        potentialCount: snap.potentialCount,
+        activePnl: snap.activePnl,
+        sessionActiveCount: snap.activeCount,
+        sessionPotentialCount: snap.potentialCount,
+        sessionActivePnl: snap.activePnl,
+        sessionRealizedPnl: snap.modeRealizedPnl,
+        activePnlSource: snap.activePnlSource,
+        sessionActiveSource: snap.activePnlSource,
+        sessionRealizedSource: snap.modeRealizedSource,
+        verdict: snap.verdict,
+        protectionRule: snap.report.protection_rule || '-',
+        serverTime: snap.snapshotAt,
+        positions: Array.isArray(snap.report.positions) ? snap.report.positions : [],
+        trackedPositions: Array.isArray(snap.report.tracked_positions) ? snap.report.tracked_positions : [],
+        capital: snap.capital,
+        capitalSource: snap.equitySource,
+    };
+}
+
+function buildStrategyCardModel(name) {
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
+    const reportMode = reportModes.get(name) || {};
+    const stats = strategyStats[name] || {};
+    const perf = performanceData[name] || {};
+    const opt = optimizerData[name] || {};
+    const liveTrades = v13TradesForMode(name, 'active');
+    const candidateTrades = v13TradesForMode(name, 'potential');
+    const livePnl = liveTrades.reduce((sum, trade) => sum + v13Num(trade.pnl, 0), 0);
+    const cumulativePnl = v13ModeRealizedPnl(name);
+    const sample = v13Num(perf.sample ?? perf.total_trades, 0);
+    const winRate = (perf.win_rate == null || sample === 0) ? '-' : pct(perf.win_rate, 1);
+    const verdict = perf.verdict || stats.verdict || 'learning';
+    const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
+    const reasonText = reportMode.reason || verdictDetail(perf);
+    return {
+        reportMode,
+        stats,
+        perf,
+        opt,
+        liveTrades,
+        candidateTrades,
+        livePnl,
+        cumulativePnl,
+        cumulativePnlSource: '來源：同一快照 performance.total_pnl',
+        winRate,
+        verdict,
+        tierLabel,
+        reasonText,
+    };
+}
+
+function refreshSourceBadges() {
+    const snap = v13Snapshot();
+    const live = `/api/trades，同步時間：${snap.snapshotAt}`;
+    const health = `/api/health-check，同步時間：${healthCheckData?.generated_at || snap.snapshotAt}`;
+    [
+        ['engine-source', `資料來源口徑：${live}`],
+        ['report-source', `資料來源口徑：${live}`],
+        ['modes-source', `資料來源口徑：${live}`],
+        ['performance-source', `資料來源口徑：${live}`],
+        ['health-source', `資料來源口徑：${health}`],
+    ].forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.textContent = value;
+            el.title = value;
+        }
+    });
+}
+
+function updateOverview() {
+    const snap = v13Snapshot();
+    const activePnl = snap.activePnl;
+    const realizedPnl = snap.modeRealizedPnl;
+    const targetProfitGoal = Number((snap.capital.target ?? TARGET_EQUITY) - (snap.capital.start ?? START_EQUITY));
+    const signedProgress = targetProfitGoal !== 0 ? (realizedPnl / targetProfitGoal) * 100 : 0;
+
+    setTextIfExists('total-equity', money(snap.equity));
+    setTextIfExists('usdt-avail', money(snap.available));
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = snap.activePnlSource;
+    }
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        capitalChangeEl.textContent = `${realizedPnl >= 0 ? '+' : ''}${money(realizedPnl)}`;
+        capitalChangeEl.className = realizedPnl >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = snap.modeRealizedSource;
+    }
+
+    setTextIfExists('version-pnl-label', 'V13 四模式已平倉合計');
+    setMetricSource('total-equity', snap.equitySource);
+    setMetricSource('usdt-avail', snap.equitySource);
+    setMetricSource('total-profit', snap.activePnlSource);
+    setMetricSource('capital-change', snap.modeRealizedSource);
+
+    updateProgressCurve(realizedPnl, signedProgress);
+    setTextIfExists('growth-title', 'V13 四模式已平倉盈虧曲線');
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(snap.verdict);
+
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${snap.activeCount}</span><strong>即時持倉</strong></div>
+            <div><span>${snap.potentialCount}</span><strong>候選訊號</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮盈</strong></div>
+        `;
+    }
+}
+
+function renderBotReport() {
+    const box = document.getElementById('bot-report');
+    if (!box) return;
+    const snap = v13Snapshot();
+    box.innerHTML = `
+        <div class="health-summary">
+            <div class="health-card">
+                <span>目前狀態</span>
+                <strong class="${snap.activeCount > 0 ? 'warn' : 'good'}">${escapeHtml(zhText(snap.verdict))}</strong>
+                <small>${escapeHtml(snap.snapshotAt)}</small>
+            </div>
+            <div class="health-card">
+                <span>OKX 活倉未實現盈虧</span>
+                <strong class="${snap.activePnl >= 0 ? 'gain' : 'loss'}">${signed(snap.activePnl)}</strong>
+                <small>${snap.activeCount} 持倉 / ${snap.potentialCount} 候選</small>
+                <small class="metric-source">${escapeHtml(snap.activePnlSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>四模式已平倉合計</span>
+                <strong class="${snap.modeRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(snap.modeRealizedPnl)}</strong>
+                <small>只看 V13 訓練/已驗證 closed trades</small>
+                <small class="metric-source">${escapeHtml(snap.modeRealizedSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>資料可信度</span>
+                <strong class="good">同一快照</strong>
+                <small>/api/trades</small>
+            </div>
+        </div>
+    `;
+}
+
+function renderEngineHeartbeat() {
+    const container = document.getElementById('engine-heartbeat');
+    if (!container) return;
+    container.innerHTML = v13Strategies().map((name) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const opt = model.opt || {};
+        const livePnl = Number(model.livePnl || 0);
+        const realizedPnl = Number(model.cumulativePnl || 0);
+        const conf = opt.capital_mult != null ? Number(opt.capital_mult).toFixed(2) : (perf.confidence != null ? Number(perf.confidence).toFixed(2) : '1.00');
+        const state = verdictLabel(model.verdict || 'learning');
+        return `
+            <div class="eng-card">
+                <div class="eng-head">
+                    <strong>${escapeHtml(strategyLabel(name))}</strong>
+                    <span class="eng-verdict">${escapeHtml(state)}</span>
+                </div>
+                <div class="eng-desc">${escapeHtml(roleText[name] || 'V13 strategy engine')}</div>
+                <div class="eng-stats" style="grid-template-columns: repeat(5, 1fr);">
+                    <div><span>勝率</span><strong>${escapeHtml(model.winRate)}</strong></div>
+                    <div><span>信心</span><strong>${escapeHtml(conf)}x</strong></div>
+                    <div><span>即時持倉</span><strong>${model.liveTrades.length}</strong></div>
+                    <div><span>活倉浮盈</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${signed(livePnl, 1)}U</strong><small class="metric-source">OKX 活倉快照</small></div>
+                    <div><span>已平倉</span><strong class="${realizedPnl >= 0 ? 'gain' : 'loss'}">${signed(realizedPnl, 1)}U</strong><small class="metric-source">performance.total_pnl</small></div>
+                </div>
+                <div class="eng-scan-status">${model.candidateTrades.length > 0 ? `<span class="eng-scanning">候選 ${model.candidateTrades.length} 筆</span>` : `<span class="eng-idle">等待符合條件</span>`}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderModeCards() {
+    const container = document.getElementById('mode-cards');
+    if (!container) return;
+    container.innerHTML = '';
+    v13Strategies().forEach((name) => {
+        const profile = profiles[name] || {};
+        const model = buildStrategyCardModel(name);
+        const livePnl = Number(model.livePnl || 0);
+        const realizedPnl = Number(model.cumulativePnl || 0);
+        const perf = model.perf || {};
+        const card = document.createElement('article');
+        card.className = 'mode-card';
+        card.innerHTML = `
+            <div class="mode-card-head">
+                <strong>${escapeHtml(strategyLabel(name))}</strong>
+                ${verdictBadge(model.verdict)}
+            </div>
+            <p>${escapeHtml(model.tierLabel || '觀察中')}</p>
+            <div class="mode-stats">
+                <div><span>即時持倉</span><strong class="${model.liveTrades.length > 0 ? 'gain' : ''}">${model.liveTrades.length}</strong></div>
+                <div><span>候選</span><strong>${model.candidateTrades.length}</strong></div>
+                <div><span>活倉浮盈</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}</strong><small class="metric-source">OKX 活倉快照</small></div>
+                <div><span>勝率</span><strong>${escapeHtml(model.winRate)}</strong></div>
+                <div><span>期望值</span><strong class="${v13Num(perf.expectancy, 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>PF</span><strong class="${v13Num(perf.profit_factor, 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
+            </div>
+            <p class="mode-note">${escapeHtml(model.reasonText || '')}</p>
+            <p class="mode-note cumulative-note">已平倉合計：${escapeHtml(signed(realizedPnl, 1))}U <span class="metric-source-inline">來源：performance.total_pnl</span></p>
+            <div class="rule-line">60U x 1.00 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr || '-'}x ATR / TP ${profile.tp_atr || '-'}x ATR</div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+function renderPerformance() {
+    const tbody = document.getElementById('performance-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    const metaEl = document.getElementById('performance-metadata');
+    if (metaEl) {
+        const snap = v13Snapshot();
+        metaEl.textContent = `資料來源：/api/trades，同步時間：${snap.snapshotAt}。即時欄位看 OKX 活倉快照；學習欄位看 V13 已驗證 closed trades。`;
+        metaEl.title = '此表不再使用舊帳戶層累積值。';
+    }
+
+    const names = v13Strategies().filter((name) => currentStrategyFilter === 'All' || name === currentStrategyFilter);
+    if (!names.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+
+    names.forEach((name) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const opt = model.opt || {};
+        const livePnl = Number(model.livePnl || 0);
+        const pf = v13Num(perf.profit_factor, 0);
+        const exp = v13Num(perf.expectancy, 0);
+        const sample = v13Num(perf.sample ?? perf.total_trades, 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>
+                <strong>${escapeHtml(strategyLabel(name))}</strong>
+                <small>來源：同一份 /api/trades 快照</small>
+            </td>
+            <td>
+                ${model.liveTrades.length} / ${model.candidateTrades.length}
+                <small>${escapeHtml(verdictLabel(model.verdict || 'learning'))}</small>
+            </td>
+            <td class="${livePnl >= 0 ? 'gain' : 'loss'}">
+                ${money(livePnl)}
+                <small>OKX 活倉快照</small>
+            </td>
+            <td>
+                ${sample} / ${perf.win_rate == null || sample === 0 ? '-' : pct(perf.win_rate, 1)}
+                <small>已驗證 closed trades / 勝率</small>
+            </td>
+            <td class="${pf >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</td>
+            <td>
+                <span class="gain">${money(perf.avg_win)}</span> / <span class="loss">${money(perf.avg_loss)}</span>
+            </td>
+            <td class="${exp >= 0 ? 'gain' : 'loss'}">${money(exp)}</td>
+            <td>
+                ${verdictBadge(perf.verdict || model.verdict)}
+                <div style="font-size: 10px; color: #a1a1aa; margin-top: 4px; line-height: 1.3;">
+                    optimizer：${escapeHtml(optimizerLabel(opt))}<br>
+                    已平倉合計：${escapeHtml(signed(model.cumulativePnl, 1))}U
+                </div>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function getUnifiedReportMetrics() {
+    const capital = accountData.capital || {};
+    const activeTrades = currentTrades.filter((trade) => trade.status === 'active');
+    const potentialTrades = currentTrades.filter((trade) => trade.status === 'potential');
+    const report = reportData && typeof reportData === 'object' ? reportData : {};
+    const capitalUnrealized = Number(
+        capital.strategy_unrealized ??
+        report.active_pnl ??
+        activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
+    );
+    const capitalSnapshotAvailable = Boolean(capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    return {
+        activeCount: Number(report.active_count ?? activeTrades.length ?? 0),
+        potentialCount: Number(report.potential_count ?? potentialTrades.length ?? 0),
+        activePnl: capitalUnrealized,
+        sessionActiveCount: Number(report.session_active_count ?? 0),
+        sessionPotentialCount: Number(report.session_potential_count ?? 0),
+        sessionActivePnl: Number(report.session_active_pnl ?? 0),
+        sessionRealizedPnl: Number(report.session_realized_pnl ?? 0),
+        activePnlSource: capital.strategy_unrealized_source || report.active_pnl_source || 'OKX / 活倉快照',
+        sessionActiveSource: report.session_active_pnl_source || 'OKX / 活倉快照',
+        sessionRealizedSource: report.session_realized_pnl_source || '已驗證歷史 / session alphaPnl',
+        verdict: report.verdict || '觀察中',
+        protectionRule: report.protection_rule || '-',
+        serverTime: report.server_time || '-',
+        positions: Array.isArray(report.positions) ? report.positions : [],
+        trackedPositions: Array.isArray(report.tracked_positions) ? report.tracked_positions : [],
+        capital,
+        capitalSnapshotAvailable,
+        capitalSource: capital.account_layer_source || capital.cumulative_source || capital.pnl_source || (capitalSnapshotAvailable ? 'OKX / 帳戶快照' : '帳戶快照不可用 / Session 推算'),
+    };
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable ?? capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    const capitalPnl = capitalSnapshotAvailable ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0) : null;
+    const sessionPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.account_layer_source || capital.cumulative_source || 'OKX / 帳戶快照';
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        if (capitalPnl == null || !Number.isFinite(capitalPnl)) {
+            capitalChangeEl.textContent = '--';
+            capitalChangeEl.className = 'value';
+            capitalChangeEl.title = 'OKX 帳戶快照不可用，未以策略推算值冒充帳戶層';
+        } else {
+            capitalChangeEl.textContent = `${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)}`;
+            capitalChangeEl.className = capitalPnl >= 0 ? 'gain' : 'loss';
+            capitalChangeEl.title = `帳戶層來源：${capitalSource}`;
+        }
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧（帳戶層）' : 'V13 累積盈虧（帳戶快照不可用）';
+    setMetricSource('capital-change', capitalSnapshotAvailable ? `來源：${capitalSource}` : '來源：OKX 帳戶快照不可用 / 只顯示 Session 推算');
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (sessionPnl / targetProfitGoal) * 100 : 0);
+    const curvePnl = capitalSnapshotAvailable ? Number(capitalPnl ?? 0) : sessionPnl;
+    updateProgressCurve(curvePnl, signedProgress);
+
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧曲線（帳戶層）' : 'V13 Session 推算曲線（非帳戶層）';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+}
+
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    const summary = document.getElementById('history-summary');
+    tbody.innerHTML = '';
+    const rows = filtered(historyData).slice(0, 80);
+    const closedTradeTotalPnl = rows.reduce((sum, item) => {
+        const info = item.info || {};
+        return sum + Number(item.realizedPnl || info.realizedPnl || 0);
+    }, 0);
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉筆數</span>
+                <strong>${rows.length}</strong>
+            </div>
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${closedTradeTotalPnl >= 0 ? 'gain' : 'loss'}">${signed(closedTradeTotalPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>本頁口徑</span>
+                <strong>只看 closed trades</strong>
+            </div>
+        `;
+    }
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+    rows.forEach((item) => {
+        const info = item.info || {};
+        const pnl = Number(item.realizedPnl || info.realizedPnl || 0);
+        const fee = Number(item.fee ?? info.fee ?? 0);
+        const funding = Number(item.fundingFee ?? info.fundingFee ?? 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${String(item.symbol || '').replace(':USDT', '')}</strong></td>
+            <td>${directionLabel(item.direction || info.direction)}</td>
+            <td>${strategyLabel(item.strategy)}</td>
+            <td>${info.lever || '-'}x</td>
+            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>手續費 ${signed(fee, 4)} / 資金費 ${signed(funding, 4)}</small></td>
+            <td>${item.timestamp ? new Date(item.timestamp).toLocaleString() : '-'}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderModeCards() {
+    const container = document.getElementById('mode-cards');
+    if (!container) return;
+    container.innerHTML = '';
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    Object.entries(profiles).forEach(([name, profile]) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf;
+        const opt = model.opt;
+        const liveTrades = model.liveTrades;
+        const candidateTrades = model.candidateTrades;
+        const livePnl = model.livePnl;
+        const pnl = model.cumulativePnl;
+        const pnlSource = model.cumulativePnlSource || '來源：已驗證歷史 / alphaPnl';
+        const winRate = model.winRate;
+        const verdict = model.verdict;
+        const tierLabel = model.tierLabel;
+        const reasonText = model.reasonText;
+        const card = document.createElement('article');
+        card.className = 'mode-card';
+        card.innerHTML = `
+            <div class="mode-card-head">
+                <strong>${strategyLabel(name)}</strong>
+                ${verdictBadge(verdict)}
+            </div>
+            <p>${tierLabel}</p>
+            <div class="mode-stats">
+                <div><span>持倉</span><strong class="${liveTrades.length > 0 ? 'gain' : ''}">${liveTrades.length}</strong></div>
+                <div><span>候選</span><strong>${candidateTrades.length}</strong></div>
+                <div><span>活倉浮動</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}</strong><small class="metric-source">來源：OKX / 活倉快照</small></div>
+                <div><span>勝率</span><strong>${winRate}</strong></div>
+                <div><span>期望值</span><strong class="${Number(perf.expectancy || 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>PF</span><strong class="${Number(perf.profit_factor || 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
+            </div>
+            <p class="mode-note">${escapeHtml(reasonText)}</p>
+            <p class="mode-note cumulative-note">模式已實現盈虧 ${escapeHtml(signed(pnl, 1))}U<span class="metric-source-inline">${escapeHtml(pnlSource)}</span></p>
+            <div class="rule-line">60U x 1.00 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr}x ATR / TP ${profile.tp_atr}x ATR</div>
+        `;
+        container.appendChild(card);
+    });
+}
+
+function renderEngineHeartbeat() {
+    const container = document.getElementById('engine-heartbeat');
+    if (!container) return;
+    const engines = ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter'];
+    container.innerHTML = engines.map((name) => {
+        const meta = ENGINE_META[name] || { icon: '•', desc: name, color: '#888' };
+        const model = buildStrategyCardModel(name);
+        const stats = model.stats;
+        const perf = model.perf;
+        const opt = model.opt;
+        const active = model.liveTrades.length;
+        const signals = model.candidateTrades.length;
+        const livePnl = Number(model.livePnl || 0);
+        const cumulativePnl = Number(model.cumulativePnl || 0);
+        const cumulativePnlSource = model.cumulativePnlSource || '來源：已驗證歷史 / alphaPnl';
+        const wr = model.winRate;
+        const conf = opt.capital_mult != null ? opt.capital_mult.toFixed(2) : (stats.confidence != null ? stats.confidence.toFixed(2) : '1.00');
+        const verdict = verdictLabel(model.verdict);
+        const verdictColor = perf.state === 'exploit' ? '#22c55e' : perf.state === 'steady' ? '#60a5fa' : perf.state === 'pause' ? '#ef4444' : '#f59e0b';
+        return `
+        <div class="eng-card" style="border-top: 3px solid ${meta.color}">
+            <div class="eng-head">
+                <strong>${escapeHtml(meta.icon)} ${escapeHtml(strategyLabel(name))}</strong>
+                <span class="eng-verdict" style="color:${verdictColor}">${escapeHtml(verdict)}</span>
+            </div>
+            <div class="eng-desc">${escapeHtml(meta.desc)}</div>
+            <div class="eng-stats" style="grid-template-columns: repeat(5, 1fr);">
+                <div><span>勝率</span><strong>${escapeHtml(wr)}</strong></div>
+                <div><span>信心</span><strong>${escapeHtml(conf)}x</strong></div>
+                <div><span>持倉</span><strong>${escapeHtml(active)} 筆</strong></div>
+                <div><span>活倉浮動</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${escapeHtml(signed(livePnl, 1))}U</strong><small class="metric-source">來源：OKX / 活倉快照</small></div>
+                <div><span>模式已實現</span><strong class="${cumulativePnl >= 0 ? 'gain' : 'loss'}">${escapeHtml(signed(cumulativePnl, 1))}U</strong><small class="metric-source">${escapeHtml(cumulativePnlSource)}</small></div>
+            </div>
+            <div class="eng-scan-status">${signals > 0 ? `<span class="eng-scanning">掃描中 ${signals} 個候選</span>` : `<span class="eng-idle">待命</span>`}</div>
+        </div>`;
+    }).join('');
+}
+
+function renderBotReport() {
+    const box = document.getElementById('bot-report');
+    if (!box) return;
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const metrics = getUnifiedReportMetrics();
+    const activeCount = Number(metrics.activeCount || 0);
+    const potentialCount = Number(metrics.potentialCount || 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const sessionActivePnl = Number(metrics.sessionActivePnl || 0);
+    const sessionRealizedPnl = Number(metrics.sessionRealizedPnl || 0);
+    const activePnlSource = metrics.activePnlSource || 'OKX / 活倉快照';
+    const sessionRealizedSource = metrics.sessionRealizedSource || '已驗證歷史 / session alphaPnl';
+    const verdict = zhText(metrics.verdict || '-');
+    const serverTime = metrics.serverTime || '-';
+    box.innerHTML = `
+        <div class="health-summary">
+            <div class="health-card">
+                <span>狀態</span>
+                <strong class="${activeCount > 0 ? 'warn' : 'good'}">${escapeHtml(verdict)}</strong>
+                <small>${escapeHtml(serverTime)}</small>
+            </div>
+            <div class="health-card">
+                <span>活倉浮動盈虧</span>
+                <strong class="${activePnl >= 0 ? 'gain' : 'loss'}">${signed(activePnl)}</strong>
+                <small>${activeCount} 持倉 / ${potentialCount} 候選</small>
+                <small class="metric-source">來源：${escapeHtml(activePnlSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>Session 已實現</span>
+                <strong class="${sessionRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(sessionRealizedPnl)}</strong>
+                <small>Session 浮動 ${signed(sessionActivePnl)}</small>
+                <small class="metric-source">來源：${escapeHtml(sessionRealizedSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>模式數</span>
+                <strong class="${liveModes.length > 0 ? 'gain' : 'loss'}">${liveModes.length} / ${weakModes.length}</strong>
+                <small>活躍 / 觀察</small>
+            </div>
+        </div>
+    `;
+}
+
+function getUnifiedReportMetrics() {
+    const capital = accountData.capital || {};
+    const activeTrades = currentTrades.filter((trade) => trade.status === 'active');
+    const potentialTrades = currentTrades.filter((trade) => trade.status === 'potential');
+    const report = reportData && typeof reportData === 'object' ? reportData : {};
+    const capitalUnrealized = Number(
+        capital.strategy_unrealized ??
+        report.active_pnl ??
+        activeTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
+    );
+    const capitalSnapshotAvailable = Boolean(capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    return {
+        activeCount: Number(report.active_count ?? activeTrades.length ?? 0),
+        potentialCount: Number(report.potential_count ?? potentialTrades.length ?? 0),
+        activePnl: capitalUnrealized,
+        sessionActiveCount: Number(report.session_active_count ?? 0),
+        sessionPotentialCount: Number(report.session_potential_count ?? 0),
+        sessionActivePnl: Number(report.session_active_pnl ?? 0),
+        sessionRealizedPnl: Number(report.session_realized_pnl ?? 0),
+        activePnlSource: capital.strategy_unrealized_source || report.active_pnl_source || 'OKX / 活倉快照',
+        sessionActiveSource: report.session_active_pnl_source || 'OKX / 活倉快照',
+        sessionRealizedSource: report.session_realized_pnl_source || '已驗證歷史 / session alphaPnl',
+        verdict: report.verdict || '觀察中',
+        protectionRule: report.protection_rule || '-',
+        serverTime: report.server_time || '-',
+        positions: Array.isArray(report.positions) ? report.positions : [],
+        trackedPositions: Array.isArray(report.tracked_positions) ? report.tracked_positions : [],
+        capital,
+        capitalSnapshotAvailable,
+        capitalSource: capital.account_layer_source || capital.cumulative_source || capital.pnl_source || (capitalSnapshotAvailable ? 'OKX / 帳戶快照' : '帳戶快照不可用 / Session 推算'),
+    };
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable);
+    const capitalDisplayPnl = capitalSnapshotAvailable
+        ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0)
+        : null;
+    const sessionDisplayPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.account_layer_source || capital.cumulative_source || 'OKX / 帳戶快照';
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        if (capitalDisplayPnl == null || !Number.isFinite(capitalDisplayPnl)) {
+            capitalChangeEl.textContent = '--';
+            capitalChangeEl.className = 'value';
+            capitalChangeEl.title = 'OKX 帳戶快照不可用，未以策略推算值冒充帳戶層';
+        } else {
+            capitalChangeEl.textContent = `${capitalDisplayPnl >= 0 ? '+' : ''}${money(capitalDisplayPnl)}`;
+            capitalChangeEl.className = capitalDisplayPnl >= 0 ? 'gain' : 'loss';
+            capitalChangeEl.title = `帳戶層來源：${capitalSource}`;
+        }
+    }
+
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) {
+        capitalLabel.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧（帳戶層）' : 'V13 累積盈虧（帳戶快照不可用）';
+    }
+    setMetricSource('capital-change', capitalSnapshotAvailable ? `來源：${capitalSource}` : '來源：OKX 帳戶快照不可用 / 只顯示 Session 推算');
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (sessionDisplayPnl / targetProfitGoal) * 100 : 0);
+    const curvePnl = capitalSnapshotAvailable ? capitalDisplayPnl : sessionDisplayPnl;
+    updateProgressCurve(curvePnl, signedProgress);
+
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        const verTag = (currentStrategyVersion.match(/v\d+/i)?.[0] || 'V13').toUpperCase();
+        curveLabel.textContent = capitalSnapshotAvailable
+            ? `${verTag} 累積盈虧 ${curvePnl >= 0 ? '+' : ''}${money(curvePnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`
+            : `${verTag} Session 推算 ${curvePnl >= 0 ? '+' : ''}${money(curvePnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
+
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) {
+        growthTitle.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧曲線（帳戶層）' : 'V13 Session 推算曲線（非帳戶層）';
+    }
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+}
+
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    const summary = document.getElementById('history-summary');
+    tbody.innerHTML = '';
+    const rows = filtered(historyData).slice(0, 80);
+    const closedTradeTotalPnl = rows.reduce((sum, item) => {
+        const info = item.info || {};
+        return sum + Number(item.realizedPnl || info.realizedPnl || 0);
+    }, 0);
+
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉筆數</span>
+                <strong>${rows.length}</strong>
+            </div>
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${closedTradeTotalPnl >= 0 ? 'gain' : 'loss'}">${signed(closedTradeTotalPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>本頁口徑</span>
+                <strong>只看 closed trades</strong>
+            </div>
+        `;
+    }
+
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+
+    rows.forEach((item) => {
+        const info = item.info || {};
+        const pnl = Number(item.realizedPnl || info.realizedPnl || 0);
+        const fee = Number(item.fee ?? info.fee ?? 0);
+        const funding = Number(item.fundingFee ?? info.fundingFee ?? 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${String(item.symbol || '').replace(':USDT', '')}</strong></td>
+            <td>${directionLabel(item.direction || info.direction)}</td>
+            <td>${strategyLabel(item.strategy)}</td>
+            <td>${info.lever || '-'}x</td>
+            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>手續費 ${signed(fee, 4)} / 資金費 ${signed(funding, 4)}</small></td>
+            <td>${item.timestamp ? new Date(item.timestamp).toLocaleString() : '-'}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable ?? capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    const capitalPnl = capitalSnapshotAvailable ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0) : null;
+    const sessionPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.account_layer_source || capital.cumulative_source || 'OKX / 帳戶快照';
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        capitalChangeEl.textContent = `${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)}`;
+        capitalChangeEl.className = capitalPnl >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = `帳戶淨值變化來源：${capitalSource}`;
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = 'V13 帳戶淨值變化';
+    setMetricSource('capital-change', `來源：${capitalSource}`);
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (capitalPnl / targetProfitGoal) * 100 : 0);
+    updateProgressCurve(capitalPnl, signedProgress);
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        curveLabel.textContent = `V13 帳戶淨值變化 ${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = 'V13 帳戶淨值變化曲線';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+}
+
+function renderHistory() {
+    const tbody = document.getElementById('history-body');
+    const summary = document.getElementById('history-summary');
+    tbody.innerHTML = '';
+    const rows = filtered(historyData).slice(0, 80);
+    const closedTradeCount = rows.length;
+    const closedTradeTotalPnl = rows.reduce((sum, item) => {
+        const info = item.info || {};
+        return sum + Number(item.realizedPnl || info.realizedPnl || 0);
+    }, 0);
+
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉筆數</span>
+                <strong>${closedTradeCount}</strong>
+            </div>
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${closedTradeTotalPnl >= 0 ? 'gain' : 'loss'}">${signed(closedTradeTotalPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>本頁口徑</span>
+                <strong>只看 closed trades</strong>
+            </div>
+        `;
+    }
+
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="empty">${text.noData}</td></tr>`;
+        return;
+    }
+
+    rows.forEach((item) => {
+        const info = item.info || {};
+        const pnl = Number(item.realizedPnl || info.realizedPnl || 0);
+        const fee = Number(item.fee ?? info.fee ?? 0);
+        const funding = Number(item.fundingFee ?? info.fundingFee ?? 0);
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td><strong>${String(item.symbol || '').replace(':USDT', '')}</strong></td>
+            <td>${directionLabel(item.direction || info.direction)}</td>
+            <td>${strategyLabel(item.strategy)}</td>
+            <td>${info.lever || '-'}x</td>
+            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>手續費 ${signed(fee, 4)} / 資金費 ${signed(funding, 4)}</small></td>
+            <td>${item.timestamp ? new Date(item.timestamp).toLocaleString() : '-'}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable ?? capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    const capitalPnl = capitalSnapshotAvailable ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0) : null;
+    const sessionPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.cumulative_source || 'OKX / 帳戶快照';
+    const modeRealizedPnl = Object.values(performanceData || {}).reduce((sum, perf) => sum + Number(perf?.total_pnl || 0), 0);
+    const historyRealizedPnl = (Array.isArray(historyData) ? historyData : []).reduce((sum, item) => {
+        const info = item?.info || {};
+        return sum + Number(item?.realizedPnl || info?.realizedPnl || 0);
+    }, 0);
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChange = capitalPnl;
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        if (capitalChange == null || !Number.isFinite(capitalChange)) {
+            capitalChangeEl.textContent = '--';
+            capitalChangeEl.className = 'value';
+            capitalChangeEl.title = 'OKX 帳戶快照不可用，未以策略推算值冒充帳戶層';
+        } else {
+            capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
+            capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
+            capitalChangeEl.title = `帳戶層來源：${capitalSource}`;
+        }
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧（帳戶層）' : 'V13 累積盈虧（帳戶快照不可用）';
+    setMetricSource('capital-change', capitalSnapshotAvailable ? `來源：${capitalSource}` : '來源：OKX 帳戶快照不可用 / 只顯示 Session 推算');
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (sessionPnl / targetProfitGoal) * 100 : 0);
+    const curvePnl = capitalSnapshotAvailable ? Number(capitalPnl ?? 0) : sessionPnl;
+    updateProgressCurve(curvePnl, signedProgress);
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        curveLabel.textContent = `V13 帳戶淨值變化 ${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧曲線（帳戶層）' : 'V13 Session 推算曲線（非帳戶層）';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+
+    const historySummary = document.getElementById('history-summary');
+    if (historySummary) {
+        historySummary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${historyRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(historyRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>模式合計已實現盈虧</span>
+                <strong class="${modeRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(modeRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>帳戶淨值變化</span>
+                <strong class="${capitalPnl >= 0 ? 'gain' : 'loss'}">${signed(capitalPnl, 4)}</strong>
+            </div>
+        `;
+    }
+}
+
+function buildStrategyCardModel(name) {
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
+    const reportMode = reportModes.get(name) || {};
+    const stats = strategyStats[name] || {};
+    const perf = performanceData[name] || {};
+    const opt = optimizerData[name] || {};
     const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && normalizedEngineBucket(trade) === name);
     const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && normalizedEngineBucket(trade) === name);
     const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
     const cumulativePnl = Number(stats.pnl || perf.total_pnl || 0);
+    const cumulativePnlSource = perf.pnl_source_label || '來源：已驗證歷史 / alphaPnl';
     const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
     const verdict = perf.verdict || stats.verdict || 'learning';
     const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
@@ -1013,11 +2601,174 @@ function buildStrategyCardModel(name) {
         candidateTrades,
         livePnl,
         cumulativePnl,
+        cumulativePnlSource,
         winRate,
         verdict,
         tierLabel,
         reasonText,
     };
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalPnl = Number(capital.cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.cumulative_source || 'OKX / 帳戶快照';
+    const modeRealizedPnl = Object.values(performanceData || {}).reduce((sum, perf) => sum + Number(perf?.total_pnl || 0), 0);
+    const historyRealizedPnl = (Array.isArray(historyData) ? historyData : []).reduce((sum, item) => {
+        const info = item?.info || {};
+        return sum + Number(item?.realizedPnl || info?.realizedPnl || 0);
+    }, 0);
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChange = capitalPnl;
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
+        capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = `帳戶淨值變化來源：${capitalSource}`;
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = 'V13 帳戶淨值變化';
+    setMetricSource('capital-change', `來源：${capitalSource}`);
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (capitalPnl / targetProfitGoal) * 100 : 0);
+    updateProgressCurve(capitalPnl, signedProgress);
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        curveLabel.textContent = `V13 帳戶淨值變化 ${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = 'V13 帳戶淨值變化曲線';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+
+    const historySummary = document.getElementById('history-summary');
+    if (historySummary) {
+        historySummary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${historyRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(historyRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>模式合計已實現盈虧</span>
+                <strong class="${modeRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(modeRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>帳戶淨值變化</span>
+                <strong class="${capitalPnl >= 0 ? 'gain' : 'loss'}">${signed(capitalPnl, 4)}</strong>
+            </div>
+        `;
+    }
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalPnl = Number(capital.cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.cumulative_source || 'OKX / 帳戶快照';
+    const modeRealizedPnl = Object.values(performanceData || {}).reduce((sum, perf) => sum + Number(perf?.total_pnl || 0), 0);
+    const historyRealizedPnl = (Array.isArray(historyData) ? historyData : []).reduce((sum, item) => {
+        const info = item?.info || {};
+        return sum + Number(item?.realizedPnl || info?.realizedPnl || 0);
+    }, 0);
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChange = capitalPnl;
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
+        capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = `帳戶淨值變化來源：${capitalSource}`;
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = 'V13 帳戶淨值變化';
+    setMetricSource('capital-change', `來源：${capitalSource}`);
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (capitalPnl / targetProfitGoal) * 100 : 0);
+    updateProgressCurve(capitalPnl, signedProgress);
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        curveLabel.textContent = `V13 帳戶淨值變化 ${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = 'V13 帳戶淨值變化曲線';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+
+    const historySummary = document.getElementById('history-summary');
+    if (historySummary) {
+        historySummary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${historyRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(historyRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>模式合計已實現盈虧</span>
+                <strong class="${modeRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(modeRealizedPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>帳戶淨值變化</span>
+                <strong class="${capitalPnl >= 0 ? 'gain' : 'loss'}">${signed(capitalPnl, 4)}</strong>
+            </div>
+        `;
+    }
 }
 
 function renderModeCards() {
@@ -1069,7 +2820,7 @@ function verdictBadge(verdict) {
     return `<span class="decision ${klass}">${verdictLabel(verdict || 'learning')}</span>`;
 }
 
-function renderPerformance() {
+function deprecatedRenderPerformance() {
     const tbody = document.getElementById('performance-body');
     tbody.innerHTML = '';
     Object.keys(profiles || {}).forEach((name) => {
@@ -1123,9 +2874,10 @@ function deprecatedRenderTrades() {
         const shownMargin = isActive ? trade.initialMargin : trade.planned_margin;
         const shownNotional = isActive ? trade.notional : trade.planned_notional;
         const shownLeverage = isActive ? trade.leverage : trade.planned_leverage;
-        const protectionFailed = trade.protection_status === 'failed' || trade.trailing_stage === 'protection_failed';
+        const protectionVerified = trade.exchange_protection_verified === true || String(trade.exchange_protection_verified || '').toLowerCase() === 'true';
+        const protectionFailed = trade.protection_status === 'failed' || trade.trailing_stage === 'protection_failed' || (isActive && trade.protection_status === 'confirmed' && !protectionVerified);
         const protectionText = protectionFailed
-            ? '\u4fdd\u8b77\u55ae\u5931\u6557'
+            ? (trade.protection_status === 'confirmed' && !protectionVerified ? 'OKX \u4fdd\u8b77\u55ae\u672a\u9a57\u8b49' : '\u4fdd\u8b77\u55ae\u5931\u6557')
             : (trade.protection_status === 'confirmed' ? '\u4ea4\u6613\u6240\u5df2\u78ba\u8a8d' : '\u5c1a\u672a\u89f8\u767c');
 
         // Trailing stop stage badge
@@ -1174,10 +2926,77 @@ function renderRadar() {
     });
 }
 
+function renderEntryEfficiency() {
+    const summary = document.getElementById('entry-efficiency-summary');
+    const reasons = document.getElementById('entry-block-reasons');
+    if (!summary || !reasons) return;
+    const data = entryEfficiencyData && typeof entryEfficiencyData === 'object' ? entryEfficiencyData : {};
+    const scan = data.scan_policy || {};
+    const edge = data.edge_policy || {};
+    const radarCounts = data.radar_counts || {};
+    const scanned = Object.values(radarCounts).reduce((sum, value) => sum + Number(value || 0), 0);
+    const modeLabel = data.arbitrage_enabled
+        ? '\u5957\u5229\u5f15\u64ce'
+        : '\u65b9\u5411\u7b56\u7565\uff08\u975e\u771f\u6b63\u5957\u5229\uff09';
+
+    summary.innerHTML = `
+        <div class="summary-card">
+            <span>\u76ee\u524d\u6a21\u5f0f</span>
+            <strong>${modeLabel}</strong>
+        </div>
+        <div class="summary-card">
+            <span>\u5019\u9078 / \u6301\u5009</span>
+            <strong>${Number(data.potential_count || 0)} / ${Number(data.active_count || 0)}</strong>
+        </div>
+        <div class="summary-card">
+            <span>\u6383\u63cf\u901f\u5ea6</span>
+            <strong>${Number(scan.symbols_per_loop || 0)}\u6a94 / ${Number(scan.loop_seconds || 0)}\u79d2</strong>
+        </div>
+        <div class="summary-card">
+            <span>\u96f7\u9054\u5373\u6642\u6a23\u672c</span>
+            <strong>${scanned}</strong>
+        </div>
+        <div class="summary-card">
+            <span>\u6700\u4f4e\u9810\u671f\u6de8\u5229</span>
+            <strong>${money(edge.min_expected_net_profit_usdt || 0)}</strong>
+        </div>
+        <div class="summary-card">
+            <span>\u6bdb\u5229 / \u6210\u672c\u9580\u6abb</span>
+            <strong>${Number(edge.min_gross_to_cost_ratio || 0).toFixed(2)}x</strong>
+        </div>
+    `;
+
+    const topReasons = Array.isArray(data.top_block_reasons) ? data.top_block_reasons : [];
+    reasons.innerHTML = topReasons.length
+        ? topReasons.map((item) => `<span>${Number(item.count || 0)}x ${zhReason(item.reason || '-')}</span>`).join('')
+        : '<span>\u76ee\u524d\u6c92\u6709\u5019\u9078\u55AE\u963b\u64cb\u8cc7\u6599</span>';
+}
+
 function renderHistory() {
     const tbody = document.getElementById('history-body');
+    const summary = document.getElementById('history-summary');
     tbody.innerHTML = '';
     const rows = filtered(historyData).slice(0, 80);
+    const closedTradeTotalPnl = rows.reduce((sum, item) => {
+        const info = item.info || {};
+        return sum + Number(item.realizedPnl || info.realizedPnl || 0);
+    }, 0);
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-card">
+                <span>已平倉筆數</span>
+                <strong>${rows.length}</strong>
+            </div>
+            <div class="summary-card">
+                <span>已平倉合計</span>
+                <strong class="${closedTradeTotalPnl >= 0 ? 'gain' : 'loss'}">${signed(closedTradeTotalPnl, 4)}</strong>
+            </div>
+            <div class="summary-card">
+                <span>本頁口徑</span>
+                <strong>只看 closed trades</strong>
+            </div>
+        `;
+    }
     if (!rows.length) {
         tbody.innerHTML = `<tr><td colspan="6" class="empty">${text.noData}</td></tr>`;
         return;
@@ -1193,13 +3012,12 @@ function renderHistory() {
             <td>${directionLabel(item.direction || info.direction)}</td>
             <td>${strategyLabel(item.strategy)}</td>
             <td>${info.lever || '-'}x</td>
-            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>\u624b\u7e8c\u8cbb ${signed(fee, 4)} / \u8cc7\u91d1\u8cbb ${signed(funding, 4)}</small></td>
+            <td class="${pnl >= 0 ? 'gain' : 'loss'}">${signed(pnl, 4)}<small>手續費 ${signed(fee, 4)} / 資金費 ${signed(funding, 4)}</small></td>
             <td>${item.timestamp ? new Date(item.timestamp).toLocaleString() : '-'}</td>
         `;
         tbody.appendChild(row);
     });
 }
-
 function renderStrategyInfo() {
     const box = document.getElementById('strategy-info');
     if (currentStrategyFilter === 'All') {
@@ -1269,6 +3087,7 @@ function updateOverview() {
     if (pnlEl) {
         pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
         pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源: ${capital.strategy_unrealized_source || 'report.active_pnl'}`;
     }
     const totalEquityEl = document.getElementById('total-equity');
     const availEl = document.getElementById('usdt-avail');
@@ -1280,13 +3099,18 @@ function updateOverview() {
     if (capitalChangeEl) {
         capitalChangeEl.textContent = `${capitalChange >= 0 ? '+' : ''}${money(capitalChange)}`;
         capitalChangeEl.className = capitalChange >= 0 ? 'gain' : 'loss';
+        capitalChangeEl.title = `累積盈虧來源: ${capital.cumulative_source || 'unknown'}`;
     }
     const capitalLabel = document.getElementById('version-pnl-label');
-    if (capitalLabel) capitalLabel.textContent = 'V13 累積盈虧';
+    if (capitalLabel) capitalLabel.textContent = `V13 累積盈虧 (${capital.cumulative_source || 'unknown'})`;
 
     const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
     const signedProgress = Number.isFinite(capital.goal_progress_pct) ? Number(capital.goal_progress_pct) : (targetProfitGoal !== 0 ? (capitalPnl / targetProfitGoal) * 100 : 0);
     updateProgressCurve(capitalPnl, signedProgress);
+    const curveLabel = document.getElementById('curve-label');
+    if (curveLabel) {
+        curveLabel.textContent = `V13 累積盈虧 ${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)} USDT (${signedProgress >= 0 ? '+' : ''}${signedProgress.toFixed(2)}%)`;
+    }
     const growthTitle = document.getElementById('growth-title');
     if (growthTitle) growthTitle.textContent = 'V13 累積盈虧曲線';
 
@@ -1322,7 +3146,8 @@ function renderTrades() {
         const shownMargin = isActive ? trade.initialMargin : trade.planned_margin;
         const shownNotional = isActive ? trade.notional : trade.planned_notional;
         const shownLeverage = isActive ? trade.leverage : trade.planned_leverage;
-        const protectionFailed = trade.protection_status === 'failed' || trade.trailing_stage === 'protection_failed';
+        const protectionVerified = trade.exchange_protection_verified === true || String(trade.exchange_protection_verified || '').toLowerCase() === 'true';
+        const protectionFailed = trade.protection_status === 'failed' || trade.trailing_stage === 'protection_failed' || (isActive && trade.protection_status === 'confirmed' && !protectionVerified);
         const protectionText = protectionLabelV2(trade);
 
         let stageBadge = '';
@@ -1347,11 +3172,12 @@ function renderTrades() {
 
 async function fetchTrades() {
     try {
-        const response = await fetch('/api/trades', { cache: 'no-store' });
+        const response = await requestJson('/api/trades', { cache: 'no-store' });
         if (!response.ok) throw new Error(`API ${response.status}`);
         const data = await response.json();
         if (data.error) console.warn('api_trades fallback', data.error);
         dashboardSnapshotAt = data.snapshot_at || data.generated_at || dashboardSnapshotAt;
+        dashboardSourceState.snapshotAt = dashboardSnapshotAt;
         currentTrades = Array.isArray(data.trades) ? data.trades : [];
         radarData = data.radar && typeof data.radar === 'object' ? data.radar : {};
         runtimeStatus = data.runtime && typeof data.runtime === 'object' ? data.runtime : runtimeStatus;
@@ -1386,9 +3212,13 @@ async function fetchTrades() {
         performanceData = data.performance && typeof data.performance === 'object' ? data.performance : performanceData;
         optimizerData = data.optimizer && typeof data.optimizer === 'object' ? data.optimizer : optimizerData;
         reportData = data.report && typeof data.report === 'object' ? data.report : reportData;
+        entryEfficiencyData = data.entry_efficiency && typeof data.entry_efficiency === 'object' ? data.entry_efficiency : {};
+        uiMetricsData = data.ui_metrics && typeof data.ui_metrics === 'object' ? data.ui_metrics : {};
+        marketRouterData = data.market_router && typeof data.market_router === 'object' ? data.market_router : {};
         if (data.health_check && typeof data.health_check === 'object') {
             healthCheckData = data.health_check;
         }
+        refreshSourceBadges();
 
         // Update Performance / Rehab Learning metadata (Version and Date range)
         const metaEl = document.getElementById('performance-metadata');
@@ -1427,7 +3257,6 @@ async function fetchTrades() {
             bannerNode.textContent = `節點：${banner.node_name || runtimeStatus.node_name || '-'}`;
         }
 
-        refreshSessionMetrics();
         updateOverview();
         renderBotReport();
         renderEngineHeartbeat();
@@ -1435,6 +3264,7 @@ async function fetchTrades() {
         renderStrategyInfo();
         renderPerformance();
         renderTrades();
+        renderEntryEfficiency();
         renderRadar();
         renderHealthCheck();
         
@@ -1460,10 +3290,10 @@ async function fetchTrades() {
 
 async function fetchHistory() {
     try {
-        const response = await fetch('/api/history', { cache: 'no-store' });
+        const response = await requestJson('/api/history', { cache: 'no-store' });
         const data = await response.json();
         historyData = Array.isArray(data.history) ? data.history : [];
-        refreshSessionMetrics();
+        refreshSourceBadges();
         renderHistory();
     } catch (error) {
         console.error('fetchHistory failed', error);
@@ -1472,7 +3302,7 @@ async function fetchHistory() {
 
 async function fetchIntelligence() {
     try {
-        const response = await fetch('/api/intelligence', { cache: 'no-store' });
+        const response = await requestJson('/api/intelligence', { cache: 'no-store' });
         const data = await response.json();
         profiles = data.profiles && typeof data.profiles === 'object' ? data.profiles : profiles;
         document.getElementById('intel-logic').textContent = '\u6bcf\u5c0f\u6642\u91cd\u65b0\u6311\u9078\u9ad8\u6d41\u52d5\u6027\u5e63\u7a2e\uff0c\u56db\u500b\u6a21\u5f0f\u5206\u5225\u6383\u63cf\uFF0C\u4ee5\u52dd\u7387\u8207 PF \u6c7a\u5b9a\u4fe1\u5fc3\u5009\u4f4d\u3002';
@@ -1620,6 +3450,156 @@ function renderEngineHeartbeat() {
     }).join('');
 }
 
+function renderPerformance() {
+    const tbody = document.getElementById('performance-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    Object.keys(profiles || {}).forEach((name) => {
+        if (currentStrategyFilter !== 'All' && name !== currentStrategyFilter) return;
+
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf || {};
+        const opt = model.opt || {};
+        const liveCount = model.liveTrades?.length || 0;
+        const candidateCount = model.candidateTrades?.length || 0;
+        const livePnl = Number(model.livePnl || 0);
+        const pf = Number(perf.profit_factor || 0);
+        const exp = Number(perf.expectancy || 0);
+        const stateLabel = optimizerLabel(opt);
+        const tunedAtr = perf.tuned_sl_atr ? `ATR 調整: ${perf.tuned_sl_atr}` : '';
+        const confidenceText = perf.confidence ? `AI 權重: ${perf.confidence}x` : '';
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>
+                <strong>${strategyLabel(name)}</strong>
+                <small>權重 ${perf.weight ?? '1.0'}x / 健康度 ${perf.health_score ?? '-'} / ${model.tierLabel || '-'}</small>
+            </td>
+            <td>
+                ${liveCount} / ${candidateCount}
+                <small>${verdictLabel(model.verdict || perf.verdict || 'learning')}</small>
+            </td>
+            <td class="${livePnl >= 0 ? 'gain' : 'loss'}">
+                ${money(livePnl)}
+                <small>同快照即時浮盈</small>
+            </td>
+            <td>
+                ${perf.sample || 0} / ${perf.win_rate == null ? '-' : pct(perf.win_rate, 1)}
+                <small>訓練樣本 / 勝率</small>
+            </td>
+            <td class="${pf >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</td>
+            <td>
+                <span class="gain">${money(perf.avg_win)}</span> / <span class="loss">${money(perf.avg_loss)}</span>
+            </td>
+            <td class="${exp >= 0 ? 'gain' : 'loss'}">${money(exp)}</td>
+            <td>
+                ${verdictBadge(perf.verdict)}
+                <div style="font-size: 10px; color: #a1a1aa; margin-top: 4px; line-height: 1.3;">
+                    狀態 ${stateLabel}<br>
+                    ${tunedAtr}${tunedAtr && confidenceText ? ' | ' : ''}${confidenceText}
+                    ${perf.max_consecutive_losses != null ? `<br>連虧 ${perf.max_consecutive_losses}` : ''}
+                    ${perf.max_drawdown != null ? `<br>回撤 ${money(perf.max_drawdown)}` : ''}
+                </div>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderHealthCheck() {
+    const summary = document.getElementById('health-summary');
+    const blocks = document.getElementById('health-blocks');
+    const detail = document.getElementById('health-detail');
+    const stateEl = document.getElementById('health-check-state');
+    if (!summary || !blocks || !detail || !stateEl) return;
+
+    const model = buildHealthCheckModel();
+    const data = model.data || {};
+    const counts = model.counts || {};
+    const liveCounts = model.liveCounts || {};
+    const sessionCounts = model.sessionCounts || {};
+    const status = String(data.status || 'warning').toLowerCase();
+    const score = Number(data.score);
+    const runtime = data.runtime || {};
+    const version = data.strategy_version || currentStrategyVersion || 'v13';
+    const zeroStart = data.zero_start || {};
+    const snapshotAt = data.snapshot_at || data.generated_at || dashboardSnapshotAt || '-';
+    const runtimeLabel = runtime.run_mode === 'live' ? '實盤' : (runtime.run_mode === 'demo' ? '模擬實盤' : '自動');
+
+    stateEl.textContent = `${healthStatusLabel(status)} / 分數 ${Number.isFinite(score) ? score.toFixed(0) : '-'}`;
+
+    summary.innerHTML = `
+        <div class="health-card">
+            <span>即時狀態</span>
+            <strong class="${healthStatusClass(status)}">${healthStatusLabel(status)}</strong>
+            <small>${escapeHtml(zhText(data.health_summary?.message || '等待檢查'))}</small>
+        </div>
+        <div class="health-card">
+            <span>即時風險</span>
+            <strong class="${liveCounts.badTrades > 0 ? 'loss' : 'gain'}">${liveCounts.badTrades ?? 0}</strong>
+            <small>${liveCounts.activeTrades ?? 0} 個持倉 / ${counts.protection_warnings ?? 0} 個警告</small>
+        </div>
+        <div class="health-card">
+            <span>執行狀態</span>
+            <strong class="${runtime.run_mode === 'live' ? 'critical' : (runtime.run_mode === 'demo' ? 'warning' : 'good')}">${runtimeLabel}</strong>
+            <small>${escapeHtml(runtime.node_name || '-')} / ${escapeHtml(snapshotAt)}</small>
+        </div>
+        <div class="health-card">
+            <span>訓練統計</span>
+            <strong class="${sessionCounts.trainingIssues > 0 ? 'loss' : 'gain'}">${sessionCounts.trainingIssues ?? 0}</strong>
+            <small>${counts.verified_rows ?? 0} 已驗證 / ${counts.quarantined_rows ?? 0} 隔離 / ${counts.version_mismatch_rows ?? 0} 版本不符</small>
+        </div>
+    `;
+
+    blocks.innerHTML = `
+        <div class="health-block">
+            <div class="health-block-title">
+                <strong>即時異常</strong>
+                <span>${counts.bad_trades ?? 0} 筆</span>
+            </div>
+            <div class="health-list">
+                ${renderHealthList(data.bad_trades || [], '即時持倉異常')}
+            </div>
+        </div>
+        <div class="health-block">
+            <div class="health-block-title">
+                <strong>訓練異常</strong>
+                <span>${counts.training_issues ?? 0} 筆</span>
+            </div>
+            <div class="health-list">
+                ${renderHealthList(data.abnormal_training_rows || [], '訓練資料異常')}
+            </div>
+        </div>
+    `;
+
+    detail.innerHTML = `
+        <div class="health-detail-card">
+            <h3>即時狀態</h3>
+            <span class="hint">同一個快照下的持倉、警告與執行環境</span>
+            <div class="health-tags">
+                <span class="health-tag ${healthStatusClass(status)}">${healthStatusLabel(status)}</span>
+                <span class="health-tag">${runtimeLabel}</span>
+                <span class="health-tag">節點 ${escapeHtml(runtime.node_name || '-')}</span>
+                <span class="health-tag">持倉 ${liveCounts.activeTrades ?? 0}</span>
+                <span class="health-tag">警告 ${counts.protection_warnings ?? 0}</span>
+            </div>
+            <span class="hint">${escapeHtml(snapshotAt)}</span>
+        </div>
+        <div class="health-detail-card">
+            <h3>訓練統計</h3>
+            <span class="hint">驗證、隔離與版本一致性</span>
+            <div class="health-tags">
+                <span class="health-tag">已驗證 ${counts.verified_rows ?? 0}</span>
+                <span class="health-tag ${sessionCounts.trainingIssues > 0 ? 'warning' : 'good'}">訓練異常 ${sessionCounts.trainingIssues ?? 0}</span>
+                <span class="health-tag">隔離 ${counts.quarantined_rows ?? 0}</span>
+                <span class="health-tag">版本不符 ${counts.version_mismatch_rows ?? 0}</span>
+                <span class="health-tag ${zeroStart.zero_start_mode ? 'good' : 'warning'}">Zero-start ${zeroStart.zero_start_mode ? '已啟用' : '未啟用'}</span>
+            </div>
+            <span class="hint">${escapeHtml(version)}</span>
+        </div>
+    `;
+}
+
 // --- SECTION REMOVED TRIPLICATES ---
 
 async function syncGithub() {
@@ -1632,7 +3612,7 @@ async function syncGithub() {
     btn.innerHTML = '<span>⏳ 正在同步 GitHub...</span>';
 
     try {
-        const response = await fetch('/api/git-pull', {
+        const response = await requestJson('/api/git-pull', {
             cache: 'no-store',
             method: 'POST',
             headers: {
@@ -1680,7 +3660,7 @@ async function resetOptimizer() {
     btn.innerHTML = '<span>⏳ 正在重製中...</span>';
 
     try {
-        const response = await fetch('/api/reset-optimizer', {
+        const response = await requestJson('/api/reset-optimizer', {
             cache: 'no-store',
             method: 'POST',
             headers: {
@@ -1721,7 +3701,7 @@ async function resetTraining() {
     btn.innerHTML = '<span>重置訓練中...</span>';
 
     try {
-        const response = await fetch('/api/reset-training', {
+        const response = await requestJson('/api/reset-training', {
             cache: 'no-store',
             method: 'POST',
             headers: {
@@ -1747,6 +3727,44 @@ async function resetTraining() {
     }
 }
 
+async function resetTraining() {
+    if (!confirm('確定要重置訓練資料嗎？系統會先備份 active trades / journal / optimizer / cycle state，然後從 0 重新累積。請先確認 OKX 異常倉位已處理。')) {
+        return;
+    }
+
+    const btn = document.getElementById('reset-training-btn');
+    if (!btn) return;
+
+    const originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.innerHTML = '<span>重置訓練中...</span>';
+
+    try {
+        const response = await requestJson('/api/reset-training', {
+            cache: 'no-store',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+        if (response.ok && data.success) {
+            alert(data.message || '訓練資料已重新歸零。');
+            location.reload();
+        } else {
+            alert(`重置訓練失敗：${data.message || '未知錯誤'}`);
+        }
+    } catch (err) {
+        alert(`重置訓練失敗：${err.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.innerHTML = originalText;
+    }
+}
+
 async function depositDemoAsset() {
     const btn = document.getElementById('deposit-demo-btn');
     const originalText = btn ? btn.innerHTML : '';
@@ -1757,7 +3775,7 @@ async function depositDemoAsset() {
     }
 
     try {
-        const response = await fetch('/api/deposit-demo', {
+        const response = await requestJson('/api/deposit-demo', {
             cache: 'no-store',
             method: 'POST',
             headers: {
@@ -1779,4 +3797,217 @@ async function depositDemoAsset() {
             btn.innerHTML = originalText;
         }
     }
+}
+
+function buildStrategyCardModel(name) {
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const reportModes = new Map([...liveModes, ...weakModes].map((item) => [item.strategy, item]));
+    const reportMode = reportModes.get(name) || {};
+    const stats = strategyStats[name] || {};
+    const perf = performanceData[name] || {};
+    const opt = optimizerData[name] || {};
+    const liveTrades = currentTrades.filter((trade) => trade.status === 'active' && normalizedEngineBucket(trade) === name);
+    const candidateTrades = currentTrades.filter((trade) => trade.status === 'potential' && normalizedEngineBucket(trade) === name);
+    const livePnl = liveTrades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
+    const cumulativePnl = Number(stats.pnl || perf.total_pnl || 0);
+    const cumulativePnlSource = perf.pnl_source_label || '來源：已驗證歷史 / alphaPnl';
+    const winRate = (perf.win_rate == null || perf.total_trades === 0) ? '-' : pct(perf.win_rate, 1);
+    const verdict = perf.verdict || stats.verdict || 'learning';
+    const tierLabel = reportMode.tier ? modeTierLabel(reportMode.tier) : modeTierLabel(opt.state === 'exploit' || opt.state === 'steady' ? 'live_calibration' : 'watch');
+    const reasonText = reportMode.reason || verdictDetail(perf);
+    return {
+        reportMode,
+        stats,
+        perf,
+        opt,
+        liveTrades,
+        candidateTrades,
+        livePnl,
+        cumulativePnl,
+        cumulativePnlSource,
+        winRate,
+        verdict,
+        tierLabel,
+        reasonText,
+    };
+}
+
+function updateOverview() {
+    const metrics = getUnifiedReportMetrics();
+    const capital = metrics.capital || {};
+    const equity = Number(capital.equity ?? accountData.usdtEq ?? accountData.usdtAvail ?? 0);
+    const capitalSnapshotAvailable = Boolean(metrics.capitalSnapshotAvailable ?? capital.account_snapshot_available ?? capital.account_layer_pnl != null);
+    const capitalPnl = capitalSnapshotAvailable ? Number(capital.account_layer_pnl ?? capital.cumulative_pnl ?? 0) : null;
+    const sessionPnl = Number(capital.session_cumulative_pnl ?? capital.pnl_from_start ?? 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const activePnlSource = metrics.activePnlSource || capital.strategy_unrealized_source || 'OKX / 活倉快照';
+    const capitalSource = metrics.capitalSource || capital.account_layer_source || capital.cumulative_source || 'OKX / 帳戶快照';
+
+    const pnlEl = document.getElementById('total-profit');
+    if (pnlEl) {
+        pnlEl.textContent = `${activePnl >= 0 ? '+' : ''}${money(activePnl)}`;
+        pnlEl.className = `value ${activePnl >= 0 ? 'gain' : 'loss'}`;
+        pnlEl.title = `未實現損益來源：${activePnlSource}`;
+    }
+    const totalEquityEl = document.getElementById('total-equity');
+    const availEl = document.getElementById('usdt-avail');
+    if (totalEquityEl) totalEquityEl.textContent = money(equity);
+    if (availEl) availEl.textContent = money(accountData.usdtAvail ?? capital.equity ?? 0);
+    setMetricSource('total-equity', `來源：${capitalSource}`);
+    setMetricSource('usdt-avail', `來源：${capitalSource}`);
+    setMetricSource('total-profit', `來源：${activePnlSource}`);
+
+    const capitalChangeEl = document.getElementById('capital-change');
+    if (capitalChangeEl) {
+        if (capitalPnl == null || !Number.isFinite(capitalPnl)) {
+            capitalChangeEl.textContent = '--';
+            capitalChangeEl.className = 'value';
+            capitalChangeEl.title = 'OKX 帳戶快照不可用，未以策略推算值冒充帳戶層';
+        } else {
+            capitalChangeEl.textContent = `${capitalPnl >= 0 ? '+' : ''}${money(capitalPnl)}`;
+            capitalChangeEl.className = capitalPnl >= 0 ? 'gain' : 'loss';
+            capitalChangeEl.title = `帳戶層來源：${capitalSource}`;
+        }
+    }
+    const capitalLabel = document.getElementById('version-pnl-label');
+    if (capitalLabel) capitalLabel.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧（帳戶層）' : 'V13 累積盈虧（帳戶快照不可用）';
+    setMetricSource('capital-change', capitalSnapshotAvailable ? `來源：${capitalSource}` : '來源：OKX 帳戶快照不可用 / 只顯示 Session 推算');
+
+    const targetProfitGoal = Number((capital.target ?? TARGET_EQUITY) - (capital.start ?? START_EQUITY));
+    const signedProgress = Number.isFinite(capital.goal_progress_pct)
+        ? Number(capital.goal_progress_pct)
+        : (targetProfitGoal !== 0 ? (sessionPnl / targetProfitGoal) * 100 : 0);
+    const curvePnl = capitalSnapshotAvailable ? Number(capitalPnl ?? 0) : sessionPnl;
+    updateProgressCurve(curvePnl, signedProgress);
+    const growthTitle = document.getElementById('growth-title');
+    if (growthTitle) growthTitle.textContent = capitalSnapshotAvailable ? 'V13 累積盈虧曲線（帳戶層）' : 'V13 Session 推算曲線（非帳戶層）';
+
+    const verdictEl = document.getElementById('bot-verdict');
+    if (verdictEl) verdictEl.textContent = zhText(metrics.verdict || '觀察中');
+    const summaryEl = document.getElementById('operator-summary');
+    if (summaryEl) {
+        summaryEl.innerHTML = `
+            <div><span>${metrics.activeCount}</span><strong>持倉中</strong></div>
+            <div><span>${metrics.potentialCount}</span><strong>候選單</strong></div>
+            <div><span>${money(activePnl)}</span><strong>活倉浮動盈虧</strong></div>
+        `;
+    }
+}
+function renderModeCards() {
+    const container = document.getElementById('mode-cards');
+    if (!container) return;
+    container.innerHTML = '';
+    Object.entries(profiles).forEach(([name, profile]) => {
+        const model = buildStrategyCardModel(name);
+        const perf = model.perf;
+        const opt = model.opt;
+        const liveTrades = model.liveTrades;
+        const candidateTrades = model.candidateTrades;
+        const livePnl = model.livePnl;
+        const pnl = model.cumulativePnl;
+        const pnlSource = model.cumulativePnlSource || '來源：已驗證歷史 / alphaPnl';
+        const winRate = model.winRate;
+        const verdict = model.verdict;
+        const tierLabel = model.tierLabel;
+        const reasonText = model.reasonText;
+        const card = document.createElement('article');
+        card.className = 'mode-card';
+        card.innerHTML = `
+            <div class="mode-card-head">
+                <strong>${strategyLabel(name)}</strong>
+                ${verdictBadge(verdict)}
+            </div>
+            <p>${tierLabel}</p>
+            <div class="mode-stats">
+                <div><span>持倉</span><strong class="${liveTrades.length > 0 ? 'gain' : ''}">${liveTrades.length}</strong></div>
+                <div><span>候選</span><strong>${candidateTrades.length}</strong></div>
+                <div><span>活倉浮動</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${money(livePnl)}</strong><small class="metric-source">來源：OKX / 活倉快照</small></div>
+                <div><span>勝率</span><strong>${winRate}</strong></div>
+                <div><span>期望值</span><strong class="${Number(perf.expectancy || 0) >= 0 ? 'gain' : 'loss'}">${money(perf.expectancy)}</strong></div>
+                <div><span>PF</span><strong class="${Number(perf.profit_factor || 0) >= 1 ? 'gain' : 'loss'}">${perf.profit_factor ?? '-'}</strong></div>
+            </div>
+            <p class="mode-note">${escapeHtml(reasonText)}</p>
+            <p class="mode-note cumulative-note">模式已實現盈虧 ${escapeHtml(signed(pnl, 1))}U<span class="metric-source-inline">${escapeHtml(pnlSource)}</span></p>
+            <div class="rule-line">60U x 1.00 x ${Number(profile.margin_mult || 1).toFixed(2)} / SL ${profile.sl_atr}x ATR / TP ${profile.tp_atr}x ATR</div>
+        `;
+        container.appendChild(card);
+    });
+}
+function renderEngineHeartbeat() {
+    const container = document.getElementById('engine-heartbeat');
+    if (!container) return;
+    const engines = ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter'];
+    container.innerHTML = engines.map((name) => {
+        const meta = ENGINE_META[name] || { icon: '•', desc: name, color: '#888' };
+        const model = buildStrategyCardModel(name);
+        const stats = model.stats;
+        const perf = model.perf;
+        const opt = model.opt;
+        const active = model.liveTrades.length;
+        const signals = model.candidateTrades.length;
+        const livePnl = Number(model.livePnl || 0);
+        const cumulativePnl = Number(model.cumulativePnl || 0);
+        const cumulativePnlSource = model.cumulativePnlSource || '來源：已驗證歷史 / alphaPnl';
+        const wr = model.winRate;
+        const conf = opt.capital_mult != null ? opt.capital_mult.toFixed(2) : (stats.confidence != null ? stats.confidence.toFixed(2) : '1.00');
+        const verdict = verdictLabel(model.verdict);
+        const verdictColor = perf.state === 'exploit' ? '#22c55e' : perf.state === 'steady' ? '#60a5fa' : perf.state === 'pause' ? '#ef4444' : '#f59e0b';
+        return `
+        <div class="eng-card" style="border-top: 3px solid ${meta.color}">
+            <div class="eng-head">
+                <strong>${escapeHtml(meta.icon)} ${escapeHtml(strategyLabel(name))}</strong>
+                <span class="eng-verdict" style="color:${verdictColor}">${escapeHtml(verdict)}</span>
+            </div>
+            <div class="eng-desc">${escapeHtml(meta.desc)}</div>
+            <div class="eng-stats" style="grid-template-columns: repeat(5, 1fr);">
+                <div><span>勝率</span><strong>${escapeHtml(wr)}</strong></div>
+                <div><span>信心</span><strong>${escapeHtml(conf)}x</strong></div>
+                <div><span>持倉</span><strong>${escapeHtml(active)} 筆</strong></div>
+                <div><span>活倉浮動</span><strong class="${livePnl >= 0 ? 'gain' : 'loss'}">${escapeHtml(signed(livePnl, 1))}U</strong><small class="metric-source">來源：OKX / 活倉快照</small></div>
+                <div><span>模式已實現</span><strong class="${cumulativePnl >= 0 ? 'gain' : 'loss'}">${escapeHtml(signed(cumulativePnl, 1))}U</strong><small class="metric-source">${escapeHtml(cumulativePnlSource)}</small></div>
+            </div>
+            <div class="eng-scan-status">${signals > 0 ? `<span class="eng-scanning">掃描中 ${signals} 個候選</span>` : `<span class="eng-idle">待命</span>`}</div>
+        </div>`;
+    }).join('');
+}
+function renderBotReport() {
+    const box = document.getElementById('bot-report');
+    if (!box) return;
+    const { liveModes, weakModes } = getUnifiedReportModes();
+    const metrics = getUnifiedReportMetrics();
+    const activeCount = Number(metrics.activeCount || 0);
+    const potentialCount = Number(metrics.potentialCount || 0);
+    const activePnl = Number(metrics.activePnl || 0);
+    const sessionActivePnl = Number(metrics.sessionActivePnl || 0);
+    const sessionRealizedPnl = Number(metrics.sessionRealizedPnl || 0);
+    const activePnlSource = metrics.activePnlSource || 'OKX / 活倉快照';
+    const sessionRealizedSource = metrics.sessionRealizedSource || '已驗證歷史 / session alphaPnl';
+    const verdict = zhText(metrics.verdict || '-');
+    const serverTime = metrics.serverTime || '-';
+    box.innerHTML = `
+        <div class="health-summary">
+            <div class="health-card">
+                <span>狀態</span>
+                <strong class="${activeCount > 0 ? 'warn' : 'good'}">${escapeHtml(verdict)}</strong>
+                <small>${escapeHtml(serverTime)}</small>
+            </div>
+            <div class="health-card">
+                <span>活倉浮動盈虧</span>
+                <strong class="${activePnl >= 0 ? 'gain' : 'loss'}">${signed(activePnl)}</strong>
+                <small>${activeCount} 持倉 / ${potentialCount} 候選</small>
+                <small class="metric-source">來源：${escapeHtml(activePnlSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>Session 已實現</span>
+                <strong class="${sessionRealizedPnl >= 0 ? 'gain' : 'loss'}">${signed(sessionRealizedPnl)}</strong>
+                <small>Session 浮動 ${signed(sessionActivePnl)}</small>
+                <small class="metric-source">來源：${escapeHtml(sessionRealizedSource)}</small>
+            </div>
+            <div class="health-card">
+                <span>模式數</span>
+                <strong class="${liveModes.length > 0 ? 'gain' : 'loss'}">${liveModes.length} / ${weakModes.length}</strong>
+                <small>活躍 / 觀察</small>
+            </div>
+        </div>
+    `;
 }

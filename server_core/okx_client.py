@@ -11,7 +11,12 @@ from pathlib import Path
 import pandas as pd
 from . import config
 from . import state
-from .utils import as_float, clamp, json_safe, lifecycle_trade_for_history, assess_accounting_record, history_event_key, history_pos_id, session_started_at_ms, timestamp_ms
+from .utils import (
+    as_float, clamp, json_safe, lifecycle_trade_for_history,
+    assess_accounting_record, history_event_key, history_pos_id,
+    session_started_at_ms, timestamp_ms, learning_cutoff_ms,
+    infer_strategy_from_metadata,
+)
 
 okx = ccxt.okx({
     'apiKey': config.OKX_API_KEY,
@@ -68,9 +73,20 @@ def _run_okx_cli(args):
     cli_path = _resolve_okx_cli_path()
     if not cli_path:
         raise FileNotFoundError('okx.cmd not found')
-    cmd = ['cmd.exe', '/c', cli_path, *args]
+    def _ps_quote(value):
+        text = str(value or '')
+        return "'" + text.replace("'", "''") + "'"
+
+    command = ' '.join([f"& {_ps_quote(cli_path)}", *(str(arg) for arg in args)])
     proc = subprocess.run(
-        cmd,
+        [
+            'powershell.exe',
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            command,
+        ],
         capture_output=True,
         text=True,
         encoding='utf-8',
@@ -84,6 +100,17 @@ def _run_okx_cli(args):
     return proc.stdout or ''
 
 def _parse_okx_positions_cli_output(text):
+    def _symbol_from_inst_id(inst_id):
+        raw = str(inst_id or '').strip().upper()
+        if not raw:
+            return ''
+        raw = raw.replace('/', '')
+        if raw.endswith('-USDT-SWAP'):
+            return raw.replace('-USDT-SWAP', 'USDT')
+        if raw.endswith('-USD-SWAP'):
+            return raw.replace('-USD-SWAP', 'USD')
+        return raw
+
     rows = []
     header_seen = False
     for raw_line in str(text or '').splitlines():
@@ -114,7 +141,7 @@ def _parse_okx_positions_cli_output(text):
             'id': inst_id,
             'posId': inst_id,
             'instId': inst_id,
-            'symbol': normalize_symbol_key(inst_id),
+            'symbol': _symbol_from_inst_id(inst_id) or inst_id,
             'raw_symbol': inst_id,
             'side': side,
             'posSide': side,
@@ -368,49 +395,13 @@ def sync_exchange_history(force=False):
     return state.exchange_history_cache
 
 def infer_history_strategy(record, lifecycle=None):
-    sources = []
-    if lifecycle:
-        sources.append(lifecycle)
-    sources.append(record or {})
-
-    for source in sources:
-        strategy = str(source.get('strategy') or '')
-        if strategy in config.STRATEGY_PROFILES:
-            return strategy
-
-    for source in sources:
-        pattern = str(source.get('pattern') or '')
-        setup_source = str(source.get('setup_source') or '')
-        category_key = str(source.get('category_key') or '')
-        mode_verdict = str(source.get('mode_verdict') or '')
-
-        if pattern and pattern != 'Manual / Unsynced':
-            if 'Macro' in pattern:
-                return 'MacroSniper'
-            if 'Mean' in pattern:
-                return 'MeanReversion'
-            if 'Contrarian' in pattern:
-                return 'Contrarian'
-            if 'Squeeze' in pattern:
-                return 'SqueezeHunter'
-
-        if setup_source == 'mode_direct' or mode_verdict in {'learning', 'explore', 'recover', 'steady'}:
-            if 'Macro' in pattern or category_key == 'Majors':
-                return 'MacroSniper'
-            if 'Mean' in pattern:
-                return 'MeanReversion'
-            if 'Contrarian' in pattern:
-                return 'Contrarian'
-            if 'Squeeze' in pattern or category_key == 'Squeeze':
-                return 'SqueezeHunter'
-
-    fallback = lifecycle or record or {}
-    return str(fallback.get('strategy') or 'Manual')
+    return infer_strategy_from_metadata(lifecycle or {}, record or {})
 
 def realized_strategy_rows(strategy_name, limit):
     history = sync_exchange_history()
     rows = []
     seen_keys = set()
+    cutoff_ms = learning_cutoff_ms()
 
     def row_key(row):
         return (
@@ -421,7 +412,19 @@ def realized_strategy_rows(strategy_name, limit):
             str(row.get('symbol') or row.get('instId') or ''),
         )
 
+    def row_after_cutoff(row):
+        row_ms = timestamp_ms(
+            row.get('closed_at')
+            or row.get('lastUpdateTimestamp')
+            or row.get('timestamp')
+            or row.get('uTime')
+            or row.get('updated_at')
+        )
+        return row_ms >= cutoff_ms if cutoff_ms > 0 and row_ms > 0 else False
+
     for row in reversed(history):
+        if not row_after_cutoff(row):
+            continue
         if row.get('strategy') != strategy_name:
             continue
         if row.get('eligible_for_learning') is not True or row.get('accounting_status') != 'verified':
@@ -438,6 +441,7 @@ def realized_strategy_rows(strategy_name, limit):
         journal_rows = [
             row for row in reversed(state.trade_journal)
             if infer_history_strategy(row, row) == strategy_name
+            and row_after_cutoff(row)
             and row.get('status') == 'closed'
             and row.get('eligible_for_learning') is True
             and row.get('accounting_status') == 'verified'
@@ -463,6 +467,125 @@ def is_crypto_usdt_swap(market):
         return False
     base = str(market.get('base') or info.get('baseCcy') or '').upper()
     return bool(base) and base not in config.NON_CRYPTO_BASES
+
+def _okx_public_call(method_names, params=None):
+    params = params or {}
+    for name in method_names:
+        method = getattr(okx, name, None)
+        if method is not None:
+            return method(params)
+    raise AttributeError(f"OKX public method unavailable: {method_names[0]}")
+
+def _okx_swap_symbol_from_inst_id(inst_id):
+    raw = str(inst_id or '').upper().strip()
+    if not raw.endswith('-USDT-SWAP'):
+        return ''
+    base = raw.replace('-USDT-SWAP', '')
+    if not base or base in config.NON_CRYPTO_BASES:
+        return ''
+    return f'{base}/USDT:USDT'
+
+def _native_okx_usdt_swap_universe():
+    instruments_res = _okx_public_call(
+        ['public_get_public_instruments', 'publicGetPublicInstruments'],
+        {'instType': 'SWAP'},
+    )
+    tickers_res = _okx_public_call(
+        ['public_get_market_tickers', 'publicGetMarketTickers'],
+        {'instType': 'SWAP'},
+    )
+    instruments = instruments_res.get('data') if isinstance(instruments_res, dict) else []
+    tickers = tickers_res.get('data') if isinstance(tickers_res, dict) else []
+    valid_inst = {}
+    for inst in instruments or []:
+        if not isinstance(inst, dict):
+            continue
+        inst_id = str(inst.get('instId') or '')
+        symbol = _okx_swap_symbol_from_inst_id(inst_id)
+        if not symbol:
+            continue
+        if str(inst.get('settleCcy') or inst.get('settle') or 'USDT').upper() != 'USDT':
+            continue
+        if str(inst.get('state') or 'live').lower() not in {'live', ''}:
+            continue
+        valid_inst[inst_id] = symbol
+
+    rows = []
+    for ticker in tickers or []:
+        if not isinstance(ticker, dict):
+            continue
+        inst_id = str(ticker.get('instId') or '')
+        symbol = valid_inst.get(inst_id) or _okx_swap_symbol_from_inst_id(inst_id)
+        if not symbol:
+            continue
+        last = as_float(ticker.get('last') or ticker.get('lastPx'))
+        open24h = as_float(ticker.get('open24h') or ticker.get('sodUtc0'))
+        change_pct = ((last - open24h) / open24h * 100.0) if last > 0 and open24h > 0 else 0.0
+        quote_volume = as_float(ticker.get('volCcy24h') or ticker.get('volUsd24h'))
+        if quote_volume <= 0:
+            quote_volume = as_float(ticker.get('vol24h')) * last
+        rows.append({
+            'symbol': symbol,
+            'instId': inst_id,
+            'quoteVolume': quote_volume,
+            'percentage': change_pct,
+            'high': as_float(ticker.get('high24h')),
+            'low': as_float(ticker.get('low24h')),
+            'last': last,
+        })
+    rows.sort(key=lambda row: as_float(row.get('quoteVolume')), reverse=True)
+    return rows
+
+def _classify_scan_symbol(ticker, btc_pct, funding_rate=0.0):
+    sym = str(ticker.get('symbol') or '')
+    sym_clean = sym.replace(':USDT', '').replace('/', '')
+    if sym_clean in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
+        return 'Majors'
+    fr = as_float(funding_rate)
+    if fr and (fr < -0.0005 or fr > 0.0005):
+        return 'Squeeze Watch'
+    pct = as_float(ticker.get('percentage'))
+    if pct > btc_pct + 5:
+        return 'Alpha Rel. Strength'
+    if pct < -5:
+        return 'Deep Oversold'
+    high = as_float(ticker.get('high'))
+    low = as_float(ticker.get('low'))
+    if low > 0 and ((high - low) / low) > 0.10:
+        return 'High Volatility'
+    return 'High Volume'
+
+def _build_scan_universe_from_tickers(tickers, funding=None, limit=None):
+    funding = funding or {}
+    limit = int(limit or getattr(config, 'MARKET_UNIVERSE_LIMIT', 200) or 200)
+    btc_pct = 0.0
+    if isinstance(tickers, dict):
+        for key in ['BTC/USDT:USDT', 'BTC-USDT-SWAP']:
+            row = tickers.get(key)
+            if row:
+                btc_pct = as_float(row.get('percentage'))
+                break
+        ticker_rows = list(tickers.values())
+    else:
+        ticker_rows = list(tickers or [])
+        for row in ticker_rows:
+            if str(row.get('symbol') or '') == 'BTC/USDT:USDT':
+                btc_pct = as_float(row.get('percentage'))
+                break
+
+    ticker_rows = [row for row in ticker_rows if isinstance(row, dict) and row.get('symbol')]
+    ticker_rows.sort(key=lambda row: as_float(row.get('quoteVolume')), reverse=True)
+    selected_symbols = []
+    categories = {}
+    for row in ticker_rows[:max(limit, 1)]:
+        sym = row['symbol']
+        if sym in selected_symbols:
+            continue
+        fr_row = funding.get(sym) if isinstance(funding, dict) else None
+        fr = as_float((fr_row or {}).get('fundingRate')) if isinstance(fr_row, dict) else 0.0
+        selected_symbols.append(sym)
+        categories[sym] = _classify_scan_symbol(row, btc_pct, fr)
+    return selected_symbols[:limit], categories
 
 def get_top_symbols_and_categories():
     categories = {}
@@ -533,6 +656,52 @@ def get_top_symbols_and_categories():
         print(f"Error fetching top symbols: {e}")
         categories = {sym: 'Majors' for sym in config.FALLBACK_SCAN_SYMBOLS}
         return config.FALLBACK_SCAN_SYMBOLS, categories
+
+def get_top_symbols_and_categories():
+    """Load a broad OKX USDT swap universe before falling back to the static list."""
+    limit = int(getattr(config, 'MARKET_UNIVERSE_LIMIT', 200) or 200)
+    state.market_universe_limit = limit
+    state.market_universe_refresh_seconds = int(getattr(config, 'MARKET_UNIVERSE_REFRESH_SECONDS', 3600) or 3600)
+    try:
+        okx.load_markets()
+        tickers = okx.fetch_tickers(params={'instType': 'SWAP'})
+        try:
+            funding = okx.fetch_funding_rates(params={'instType': 'SWAP'})
+        except Exception:
+            funding = {}
+        swap_symbols = {
+            market['symbol']
+            for market in (getattr(okx, 'markets', {}) or {}).values()
+            if is_crypto_usdt_swap(market)
+        }
+        usdt_swaps = {symbol: row for symbol, row in (tickers or {}).items() if symbol in swap_symbols}
+        selected, categories = _build_scan_universe_from_tickers(usdt_swaps, funding, limit)
+        if len(selected) >= min(50, limit):
+            print(f"[Market Universe] Loaded {len(selected)} OKX USDT swap symbols via ccxt.")
+            state.market_universe_source = 'okx_ccxt_top_volume'
+            state.market_universe_updated_at = datetime.datetime.now(datetime.UTC).isoformat()
+            state.market_universe_error = None
+            return selected, categories
+        raise RuntimeError(f'ccxt universe too small: {len(selected)} symbols')
+    except Exception as ccxt_err:
+        print(f"Error fetching top symbols via ccxt: {ccxt_err}")
+        try:
+            native_rows = _native_okx_usdt_swap_universe()
+            selected, categories = _build_scan_universe_from_tickers(native_rows, {}, limit)
+            if len(selected) >= min(50, limit):
+                print(f"[Market Universe] Loaded {len(selected)} OKX USDT swap symbols via native public API.")
+                state.market_universe_source = 'okx_native_top_volume'
+                state.market_universe_updated_at = datetime.datetime.now(datetime.UTC).isoformat()
+                state.market_universe_error = None
+                return selected, categories
+            raise RuntimeError(f'native universe too small: {len(selected)} symbols')
+        except Exception as native_err:
+            print(f"Error fetching top symbols via OKX native public API: {native_err}")
+            categories = {sym: 'Majors' for sym in config.FALLBACK_SCAN_SYMBOLS}
+            state.market_universe_source = 'fallback_static'
+            state.market_universe_updated_at = datetime.datetime.now(datetime.UTC).isoformat()
+            state.market_universe_error = str(native_err)
+            return config.FALLBACK_SCAN_SYMBOLS, categories
 
 def fetch_market_quality(symbol):
     book = okx.fetch_order_book(symbol, limit=10)
@@ -668,11 +837,16 @@ def load_local_positions_snapshot():
                     with open(path, 'r', encoding=encoding) as f:
                         payload = json.load(f)
                     break
-                except UnicodeError:
+                except Exception:
                     continue
-            if payload is None:
-                continue
-            positions = extract_positions(payload)
+            positions = extract_positions(payload) if payload is not None else []
+            if not positions:
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        raw_text = f.read()
+                    positions = _parse_okx_positions_cli_output(raw_text)
+                except Exception:
+                    positions = []
             if not positions:
                 continue
             best_positions = [dict(row) for row in positions if isinstance(row, dict)]
@@ -755,16 +929,26 @@ def load_local_account_snapshot():
                     with open(path, 'r', encoding=encoding) as f:
                         payload = json.load(f)
                     break
-                except UnicodeError:
+                except Exception:
                     continue
-            if payload is None:
-                continue
-            account = payload.get('account') if isinstance(payload, dict) and isinstance(payload.get('account'), dict) else payload if isinstance(payload, dict) else None
-            candidate = build_snapshot_from_account_dict(
-                account,
-                f'cached_account_snapshot:{os.path.basename(path)}',
-                datetime.datetime.fromtimestamp(mtime).isoformat(timespec='seconds'),
-            )
+            candidate = None
+            if payload is not None:
+                account = payload.get('account') if isinstance(payload, dict) and isinstance(payload.get('account'), dict) else payload if isinstance(payload, dict) else None
+                candidate = build_snapshot_from_account_dict(
+                    account,
+                    f'cached_account_snapshot:{os.path.basename(path)}',
+                    datetime.datetime.fromtimestamp(mtime).isoformat(timespec='seconds'),
+                )
+            if candidate is None:
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        raw_text = f.read()
+                    candidate = _parse_okx_balance_cli_output(raw_text)
+                    if candidate:
+                        candidate['source'] = f'cached_account_snapshot:{os.path.basename(path)}'
+                        candidate['synced_at'] = datetime.datetime.fromtimestamp(mtime).isoformat(timespec='seconds')
+                except Exception:
+                    candidate = None
             if candidate is None:
                 continue
             best_snapshot = candidate
@@ -1003,6 +1187,41 @@ def fetch_open_positions_snapshot(force=False):
             })
         return fallback_positions
 
+    def _fetch_positions_from_cli():
+        cli_output = _run_okx_cli([
+            '--profile',
+            config.OKX_PROFILE.get('profile_name') or 'okx-demo',
+            '--demo',
+            'swap',
+            'positions',
+        ])
+        cli_positions = _parse_okx_positions_cli_output(cli_output)
+        if cli_positions:
+            with state.positions_snapshot_lock:
+                state.positions_snapshot_cache['fetched_at'] = time.monotonic()
+                state.positions_snapshot_cache['raw'] = [dict(p) for p in cli_positions]
+                state.positions_snapshot_cache['normalized'] = []
+                state.positions_snapshot_cache['source'] = 'okx_cli_positions'
+            return cli_positions
+        return []
+
+    if config.DEMO_MODE or config.OKX_SANDBOX_MODE:
+        try:
+            cli_positions = _fetch_positions_from_cli()
+            if cli_positions:
+                return cli_positions
+        except Exception as cli_exc:
+            print(f"[positions cli primary ERROR] {cli_exc}")
+        local_positions = load_local_positions_snapshot()
+        if local_positions:
+            print(f"[positions source] using local demo snapshot ({len(local_positions)} rows)")
+            with state.positions_snapshot_lock:
+                state.positions_snapshot_cache['fetched_at'] = time.monotonic()
+                state.positions_snapshot_cache['raw'] = [dict(p) for p in local_positions]
+                state.positions_snapshot_cache['normalized'] = []
+                state.positions_snapshot_cache['source'] = 'local_demo_snapshot'
+            return local_positions
+
     now = time.monotonic()
     with state.positions_snapshot_lock:
         if (
@@ -1062,6 +1281,17 @@ def fetch_open_positions_snapshot(force=False):
             state.positions_snapshot_cache['normalized'] = []
         return positions
     except Exception as exc:
+        # Prefer a fresher CLI positions read before falling back to any cached
+        # in-memory snapshot. This keeps the UI aligned with the actual demo/live
+        # account when the REST endpoint is stale or temporarily unavailable.
+        try:
+            cli_positions = _fetch_positions_from_cli()
+            if cli_positions:
+                print(f"[positions fallback] {exc}; recovered {len(cli_positions)} positions from okx cli")
+                return cli_positions
+        except Exception as cli_exc:
+            print(f"[positions fallback CLI ERROR] {cli_exc}")
+
         with state.positions_snapshot_lock:
             cached = state.positions_snapshot_cache.get('raw') or []
             if cached:
@@ -1143,8 +1373,8 @@ def fetch_okx_account_snapshot(force=False):
         except Exception as exc:
             last_error = exc
 
-    if response is None:
-        return None
+    if response is None and last_error:
+        print(f"[account REST fallback] {last_error}; trying okx cli/local snapshots")
 
     snapshot = {
         'totalEq': 0.0,
@@ -1265,16 +1495,50 @@ def fetch_okx_account_snapshot(force=False):
 
     return None
 
-def capital_snapshot():
+def capital_snapshot(account_snapshot=None, visible_trades=None):
     # Helper to calculate start-equity based metrics
-    acc_snap = fetch_okx_account_snapshot()
+    acc_snap = account_snapshot if isinstance(account_snapshot, dict) else fetch_okx_account_snapshot(force=True)
     account_equity = 0.0
-    if acc_snap:
-        account_equity = as_float(acc_snap.get('usdtEq'))
-        if account_equity <= 0:
-            account_equity = as_float(acc_snap.get('usdtAvail'))
-        if account_equity <= 0:
-            account_equity = as_float(acc_snap.get('totalEq'))
+    account_total_equity = 0.0
+    equity_basis = 'missing'
+
+    def _pull_equity(snapshot):
+        nonlocal account_equity, account_total_equity, equity_basis
+        if not isinstance(snapshot, dict):
+            return
+        usdt_eq = as_float(snapshot.get('usdtEq'))
+        usdt_avail = as_float(snapshot.get('usdtAvail'))
+        total_eq = max(as_float(snapshot.get('totalEq')), as_float(snapshot.get('equity')))
+        account_total_equity = max(account_total_equity, total_eq)
+
+        # V13 reports the trading capital in USDT terms. OKX totalEq can include
+        # non-USDT assets, so it is only a last-resort fallback.
+        if usdt_eq > 0:
+            candidate = usdt_eq
+            basis = 'usdtEq'
+        elif usdt_avail > 0:
+            candidate = usdt_avail
+            basis = 'usdtAvail'
+        else:
+            candidate = total_eq
+            basis = 'totalEq_fallback'
+
+        if candidate > account_equity:
+            account_equity = candidate
+            equity_basis = basis
+        nested = snapshot.get('account')
+        if isinstance(nested, dict):
+            _pull_equity(nested)
+
+    _pull_equity(acc_snap)
+    if account_equity <= 0:
+        _pull_equity(load_local_account_snapshot())
+    if account_equity <= 0 and isinstance(state.account_data, dict):
+        _pull_equity(state.account_data)
+        if isinstance(state.account_data.get('account'), dict):
+            _pull_equity(state.account_data.get('account'))
+    if account_equity <= 0 and isinstance(acc_snap, dict) and isinstance(acc_snap.get('account'), dict):
+        _pull_equity(acc_snap.get('account'))
     from .utils import session_start_equity
     session_start = session_start_equity()
     session_target = session_start + (config.TARGET_EQUITY_USDT - config.START_EQUITY_USDT)
@@ -1289,20 +1553,50 @@ def capital_snapshot():
         for row in session_history_rows
         if row.get('status') == 'closed' or row.get('closed_at')
     )
-    strategy_unrealized = sum(
-        as_float(trade.get('pnl'))
-        for trade in state.active_trades
-        if trade.get('status') == 'active'
-    )
+    # Keep unrealized PnL aligned with the live UI snapshot.
+    # This mirrors the same live-trade view used by /api/trades and /api/report.
+    strategy_unrealized = 0.0
+    try:
+        if visible_trades is None:
+            from .engine import build_live_trade_snapshot, collapse_active_records, fetch_live_okx_positions
+            live_positions = fetch_live_okx_positions()
+            visible_trades = build_live_trade_snapshot(
+                tracked_records=collapse_active_records(state.active_trades),
+                live_positions=live_positions,
+                include_potentials=False,
+            )
+        strategy_unrealized = sum(
+            as_float(trade.get('pnl'))
+            for trade in (visible_trades or [])
+            if trade.get('status') == 'active' and not trade.get('non_blocking_active')
+        )
+    except Exception:
+        seen_active_keys = set()
+        for trade in state.active_trades:
+            if trade.get('status') != 'active' or trade.get('non_blocking_active'):
+                continue
+            key = (
+                str(trade.get('instId') or trade.get('symbol') or '').upper(),
+                str(trade.get('direction') or '').lower(),
+            )
+            if key in seen_active_keys:
+                continue
+            seen_active_keys.add(key)
+            strategy_unrealized += as_float(trade.get('pnl'))
     session_cumulative_pnl = strategy_realized + strategy_unrealized
-    if account_equity > 0:
+    account_snapshot_available = account_equity > 0
+    if account_snapshot_available:
         equity = account_equity
-        cumulative_pnl = equity - session_start
+        account_layer_pnl = equity - session_start
+        cumulative_pnl = account_layer_pnl
         cumulative_source = 'okx_account'
+        account_layer_source = 'okx_account'
     else:
         equity = session_start + session_cumulative_pnl
-        cumulative_pnl = session_cumulative_pnl
-        cumulative_source = 'synthetic_session'
+        account_layer_pnl = None
+        cumulative_pnl = None
+        cumulative_source = 'account_snapshot_missing'
+        account_layer_source = 'account_snapshot_missing'
     pnl_from_start = equity - session_start
     return_pct = (pnl_from_start / session_start * 100) if session_start else 0.0
     goal_progress = (pnl_from_start / (session_target - session_start) * 100) if session_target > session_start else 0.0
@@ -1311,10 +1605,18 @@ def capital_snapshot():
         'target': round(session_target, 4),
         'equity': round(equity, 4),
         'account_equity': account_equity,
+        'account_total_equity': round(account_total_equity, 4),
+        'equity_basis': equity_basis,
+        'account_snapshot_available': account_snapshot_available,
+        'account_layer_pnl': round(account_layer_pnl, 4) if account_layer_pnl is not None else None,
+        'account_layer_source': account_layer_source,
         'session_started_at': config.SESSION_STARTED_AT,
         'strategy_realized': round(strategy_realized, 4),
-        'cumulative_pnl': round(cumulative_pnl, 4),
+        'cumulative_pnl': round(cumulative_pnl, 4) if cumulative_pnl is not None else None,
         'cumulative_source': cumulative_source,
+        'session_cumulative_pnl': round(session_cumulative_pnl, 4),
+        'session_cumulative_source': 'synthetic_session',
+        'strategy_unrealized_source': 'collapsed_active_trades',
         'quarantined_count': sum(1 for row in session_history_rows if row.get('accounting_status') == 'quarantined'),
         'quarantined_reported_pnl': round(sum(as_float(row.get('realizedPnl') or row.get('realized_pnl')) for row in session_history_rows if row.get('accounting_status') == 'quarantined'), 4),
         'strategy_unrealized': round(strategy_unrealized, 4),

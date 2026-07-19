@@ -106,6 +106,63 @@ def as_float(value, default=0.0):
     except (TypeError, ValueError):
         return default
 
+def infer_strategy_from_metadata(*sources, fallback='Manual'):
+    """Infer the real bot strategy from lifecycle metadata without trusting Manual."""
+    valid = set(config.STRATEGY_PROFILES.keys())
+    label_map = {
+        'macro sniper': 'MacroSniper',
+        'macrosniper': 'MacroSniper',
+        'macro': 'MacroSniper',
+        'mean reversion': 'MeanReversion',
+        'meanreversion': 'MeanReversion',
+        'mean': 'MeanReversion',
+        'contrarian': 'Contrarian',
+        'squeeze hunter': 'SqueezeHunter',
+        'squeezehunter': 'SqueezeHunter',
+        'squeeze': 'SqueezeHunter',
+    }
+
+    rows = [row for row in sources if isinstance(row, dict)]
+    for row in rows:
+        strategy = str(row.get('strategy') or '')
+        if strategy in valid:
+            return strategy
+        for mixed in row.get('strategy_mix') or []:
+            if str(mixed) in valid:
+                return str(mixed)
+
+    for row in rows:
+        text = ' '.join(
+            str(row.get(key) or '')
+            for key in [
+                'pattern', 'entry_reason', 'mode_reason', 'exit_model',
+                'runner_policy', 'setup_source', 'category_key', 'mode_verdict',
+            ]
+        ).lower()
+        for needle, strategy in label_map.items():
+            if needle in text:
+                return strategy
+
+    for row in rows:
+        optimizer = row.get('optimizer') or {}
+        has_lifecycle_evidence = any(
+            row.get(key) not in [None, '', [], {}]
+            for key in ['lifecycle_id', 'strategy_version', 'entry_reason', 'signal_candle']
+        )
+        pattern = str(row.get('pattern') or '')
+        if pattern and pattern != 'Manual / Unsynced':
+            has_lifecycle_evidence = True
+        if isinstance(optimizer, dict) and has_lifecycle_evidence:
+            strategy = str(optimizer.get('strategy') or '')
+            if strategy in valid:
+                return strategy
+
+    for row in rows:
+        strategy = str(row.get('strategy') or '')
+        if strategy and strategy not in {'Manual', 'Mixed'}:
+            return strategy
+    return fallback
+
 def has_valid_protection(trade):
     if not isinstance(trade, dict):
         return False
@@ -114,12 +171,23 @@ def has_valid_protection(trade):
     if sl <= 0 or tp1 <= 0:
         return False
     status = str(trade.get('protection_status') or '').lower()
-    if status in {'failed', 'pending'}:
+    if status != 'confirmed':
+        return False
+    if not config.MOCK_MODE and not trade.get('exchange_protection_verified'):
         return False
     return True
 
 def session_start_equity():
     if config.SESSION_START_EQUITY_USDT is None:
+        baseline = load_json_dict(getattr(config, 'ACCOUNT_SESSION_BASELINE_FILE', ''))
+        saved_equity = as_float(baseline.get('session_start_equity'))
+        if saved_equity > 0:
+            config.SESSION_START_EQUITY_USDT = saved_equity
+            saved_started_at = baseline.get('session_started_at')
+            if saved_started_at:
+                config.SESSION_STARTED_AT = saved_started_at
+            return config.SESSION_START_EQUITY_USDT
+
         base_equity = 0.0
         # Will be updated when account data is fetched
         if hasattr(state, 'account_data') and isinstance(state.account_data, dict):
@@ -130,10 +198,43 @@ def session_start_equity():
             )
         if base_equity > 0:
             config.SESSION_START_EQUITY_USDT = base_equity
+            started_at = config.SESSION_STARTED_AT or datetime.datetime.now().isoformat(timespec='seconds')
+            try:
+                write_json_atomic(getattr(config, 'ACCOUNT_SESSION_BASELINE_FILE', ''), {
+                    'node_name': config.NODE_NAME,
+                    'strategy_version': config.STRATEGY_VERSION,
+                    'session_started_at': started_at,
+                    'session_start_equity': round(base_equity, 8),
+                    'source': 'okx_account_snapshot',
+                })
+            except Exception as exc:
+                print(f"Failed to persist account session baseline: {exc}")
     return config.SESSION_START_EQUITY_USDT if config.SESSION_START_EQUITY_USDT is not None else config.START_EQUITY_USDT
+
+def reset_session_equity_baseline():
+    config.SESSION_STARTED_AT = datetime.datetime.now().isoformat(timespec='seconds')
+    config.SESSION_START_EQUITY_USDT = None
+    path = getattr(config, 'ACCOUNT_SESSION_BASELINE_FILE', '')
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception as exc:
+            print(f"Failed to remove account session baseline: {exc}")
 
 def session_started_at_ms():
     return timestamp_ms(config.SESSION_STARTED_AT)
+
+def learning_cutoff_ms():
+    """Earliest close/open time allowed to affect V13 learning metrics."""
+    if config.ZERO_START_MODE:
+        manifest = load_json_dict(config.ZERO_START_STATE_FILE)
+        reset_ms = timestamp_ms(
+            manifest.get('reset_at')
+            or manifest.get('bootstrapped_at')
+        )
+        if reset_ms > 0:
+            return reset_ms
+    return session_started_at_ms()
 
 def is_session_trade(trade):
     started_ms = session_started_at_ms()
@@ -180,7 +281,24 @@ def lifecycle_trade_for_history(record):
     opened_ms = timestamp_ms(info.get('cTime') or record.get('datetime') or record.get('timestamp'))
     inst_id = str(info.get('instId') or record.get('instId') or '')
     direction = str(info.get('direction') or record.get('side') or '').lower()
+    open_price = as_float(
+        info.get('openAvgPx')
+        or record.get('openPrice')
+        or record.get('entryPrice')
+        or record.get('avgPx')
+    )
     candidates = []
+    def add_candidate(trade, distance=0, active_rank=None):
+        trade_open_ms = trade_open_timestamp_ms(trade)
+        trade_entry = as_float(trade.get('entry'))
+        entry_delta = abs(open_price - trade_entry) if open_price > 0 and trade_entry > 0 else 0.0
+        entry_scale = max(open_price, trade_entry, 1.0)
+        entry_rank = entry_delta / entry_scale if entry_scale > 0 else 0.0
+        manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
+        if active_rank is None:
+            active_rank = 0 if trade in state.active_trades else 1
+        candidates.append((manual_rank, active_rank, entry_rank, distance, trade_open_ms or 0, trade))
+
     for trade in list(reversed(state.active_trades)) + list(reversed(state.trade_journal)):
         if str(trade.get('posId') or '') != pos_id:
             continue
@@ -195,9 +313,7 @@ def lifecycle_trade_for_history(record):
             continue
         distance = abs(trade_open_ms - opened_ms)
         if distance <= config.LIFECYCLE_OPEN_TOLERANCE_MS:
-            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            active_rank = 0 if trade in state.active_trades else 1
-            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
+            add_candidate(trade, distance)
     if not candidates and pos_id:
         # Some OKX history payloads expose a distinct record id while the
         # lifecycle match lives under info.posId. If the timestamp tolerance
@@ -215,9 +331,7 @@ def lifecycle_trade_for_history(record):
                 continue
             trade_open_ms = trade_open_timestamp_ms(trade)
             distance = abs(trade_open_ms - opened_ms) if trade_open_ms and opened_ms else 0
-            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            active_rank = 0 if trade in state.active_trades else 1
-            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
+            add_candidate(trade, distance)
     if not candidates and inst_id and direction:
         # Broader recovery path: if the exact posId match is missing, try to
         # recover the lifecycle from the same instrument/direction pair near the
@@ -238,12 +352,10 @@ def lifecycle_trade_for_history(record):
                     continue
             else:
                 distance = 0
-            manual_rank = 1 if str(trade.get('strategy') or '') == 'Manual' else 0
-            active_rank = 0 if trade in state.active_trades else 1
-            candidates.append((manual_rank, active_rank, distance, trade_open_ms, trade))
+            add_candidate(trade, distance)
     if not candidates:
         return None
-    return min(candidates, key=lambda row: (row[0], row[1], row[2], -row[3]))[4]
+    return min(candidates, key=lambda row: (row[0], row[1], row[2], row[3], -row[4]))[5]
 
 def default_training_cycle_state():
     return {
@@ -310,8 +422,10 @@ def ensure_zero_start_storage(force=False):
         config.TRADE_FILE,
         config.LEGACY_JOURNAL_FILE,
         config.LEGACY_TRADE_FILE,
+        *config.LOCAL_POSITIONS_SNAPSHOT_PATHS,
         *config.LOCAL_ACCOUNT_SNAPSHOT_PATHS,
         config.ZERO_START_STATE_FILE,
+        getattr(config, 'ACCOUNT_SESSION_BASELINE_FILE', ''),
         config.GLOBAL_OPTIMIZER_FILE,
         config.TRAINING_CYCLE_STATE_FILE,
     ]
@@ -350,8 +464,11 @@ def ensure_zero_start_storage(force=False):
 
 def assess_accounting_record(record, lifecycle):
     """Keep suspicious OKX history visible, but out of learning and sizing."""
-    strategy_name = record.get('strategy')
-    is_valid_strategy = strategy_name in ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter']
+    strategy_name = record.get('strategy') or (lifecycle or {}).get('strategy')
+    valid_strategies = ['MacroSniper', 'MeanReversion', 'Contrarian', 'SqueezeHunter']
+    # Some legacy lifecycle rows do not carry a strategy name, but still have an
+    # exact lifecycle match. Keep them learnable if the risk envelope is sane.
+    is_valid_strategy = strategy_name in valid_strategies or (not strategy_name and bool(lifecycle))
 
     if not lifecycle:
         return {
@@ -383,12 +500,24 @@ def assess_accounting_record(record, lifecycle):
     lifecycle_sl = as_float(lifecycle.get('sl'))
     lifecycle_tp1 = as_float(lifecycle.get('tp1'))
     protection_status = str(lifecycle.get('protection_status') or '').lower()
-    if lifecycle_sl <= 0 or lifecycle_tp1 <= 0 or protection_status in {'failed', 'pending', 'unconfirmed'}:
+    exit_reason = str(lifecycle.get('exit_reason') or '').lower()
+    sync_status = str(lifecycle.get('sync_status') or '').lower()
+    if (
+        lifecycle.get('emergency_close_submitted')
+        or 'emergency' in exit_reason
+        or 'repair' in exit_reason
+        or 'manual_close' in exit_reason
+        or sync_status == 'closed_without_open_position'
+    ):
+        reasons.append('repair/emergency close is not a strategy learning sample')
+    if lifecycle_sl <= 0 or protection_status in {'failed', 'pending', 'unconfirmed'}:
         reasons.append('missing TP/SL protection')
 
     if expected_entry > 0 and open_price > 0:
-        entry_tolerance = max(expected_entry * 0.01, stop_distance * 2.0)
-        if abs(open_price - expected_entry) > entry_tolerance:
+        entry_delta = abs(open_price - expected_entry)
+        entry_tolerance = max(expected_entry * 0.015, stop_distance * 4.0)
+        hard_entry_tolerance = max(expected_entry * 0.05, stop_distance * 10.0)
+        if entry_delta > hard_entry_tolerance:
             reasons.append('exchange open price does not match lifecycle entry')
 
     direction = str(lifecycle.get('direction') or '').lower()
@@ -406,6 +535,12 @@ def assess_accounting_record(record, lifecycle):
     ) if expected_entry > 0 else False
     if extreme_loss and extreme_price:
         reasons.append('loss and close price exceed lifecycle risk envelope')
+    elif expected_entry > 0 and open_price > 0 and abs(open_price - expected_entry) > entry_tolerance:
+        # OKX position history can report an averaged open price after partial
+        # fills or add-ons. Keep the loss learnable if the close still stayed
+        # inside the planned risk envelope.
+        record['accounting_warnings'] = list(record.get('accounting_warnings') or [])
+        record['accounting_warnings'].append('exchange open price differs from lifecycle entry but stayed within risk envelope')
 
     # 強制放寬：如果是核心策略單，即使觸發了隔離審計，也依然允許學習其虧損和盈利軌跡來修復參數
     return {

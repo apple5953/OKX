@@ -1,5 +1,13 @@
-import ccxt
 import os
+
+if os.getenv("RUN_OKX_DEMO_ORDER_TESTS") != "1":
+    print(
+        "SKIPPED: test_ccxt_tpsl.py sends real OKX demo orders. "
+        "Set RUN_OKX_DEMO_ORDER_TESTS=1 only when you intentionally want to test live demo order placement."
+    )
+    raise SystemExit(0)
+
+import ccxt
 from dotenv import load_dotenv
 import traceback
 

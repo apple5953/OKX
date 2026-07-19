@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>&#x8AE7;&#x6CE2;&#x76C8;&#x5229;&#x6A5F;&#x5668;&#x4EBA;</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="style.css?v=9">
+    <link rel="stylesheet" href="style.css?v=11">
     <style>
         .pulse-dot {
             width: 8px;
@@ -123,6 +123,7 @@
             <div class="panel-head">
                 <h2>&#x5F15;&#x64CE;&#x5373;&#x6642;&#x72C0;&#x614B;</h2>
                 <span class="hint">&#x6BCF; 5 &#x79D2;&#x66F4;&#x65B0;&#xFF0C;&#x986F;&#x793A;&#x6BCF;&#x500B;&#x5F15;&#x64CE;&#x76EE;&#x524D;&#x5728;&#x505A;&#x4EC0;&#x9EBC;</span>
+                <span class="source-pill" id="engine-source">資料來源口徑：/api/trades</span>
             </div>
             <div id="engine-heartbeat" class="engine-grid"></div>
         </section>
@@ -131,6 +132,7 @@
             <div class="panel-head">
                 <h2>&#x6A5F;&#x5668;&#x4EBA;&#x5373;&#x6642;&#x5831;&#x544A;</h2>
                 <span class="hint">&#x6BCF; 5 &#x79D2;&#x81EA;&#x52D5;&#x66F4;&#x65B0;&#xFF0C;&#x4E00;&#x773C;&#x770B;&#x61C2;&#x73FE;&#x5728;&#x6709;&#x6C92;&#x6709;&#x6301;&#x5009;&#x3001;&#x54EA;&#x500B;&#x6A21;&#x5F0F;&#x5728;&#x8CA0;&#x8CAC;&#x3001;&#x662F;&#x5426;&#x5DF2;&#x9396;&#x5229;&#x3002;</span>
+                <span class="source-pill" id="report-source">資料來源口徑：/api/trades</span>
             </div>
             <div id="bot-report" class="bot-report"></div>
         </section>
@@ -166,7 +168,7 @@
         <section class="data-panel">
             <div class="panel-head">
                 <h2>&#x76C8;&#x5229;&#x9A57;&#x8B49; / &#x5FA9;&#x5065;&#x5B78;&#x7FD2;</h2>
-                <span class="hint">&#x5F31;&#x52E2;&#x6A21;&#x5F0F;&#x7E7C;&#x7E8C;&#x6383;&#x63CF;&#x8207;&#x6536;&#x6A23;&#x672C;&#xFF0C;&#x4EE5; 60U &#x70BA;&#x57FA;&#x6E96;&#x4FDD;&#x8B49;&#x91D1;&#xFF0C;&#x7E3E;&#x6548;&#x6539;&#x5584;&#x5F8C;&#x624D;&#x81EA;&#x52D5;&#x653E;&#x5927;</span>
+                <span class="hint">&#x540C;&#x4E00;&#x500B;&#x5FEB;&#x7167;&#x4E0B;&#xFF0C;&#x540C;&#x6B65;&#x986F;&#x793A;&#x5373;&#x6642;&#x6301;&#x5009;&#x3001;&#x5019;&#x9078;&#x8207;&#x5B78;&#x7FD2;&#x7D71;&#x8A08;&#xFF0C;&#x4E0D;&#x518D;&#x55AE;&#x7368;&#x7528;&#x820A;&#x5275;&#x53F7;&#x50F9;</span>
                 <span class="hint" id="performance-metadata" style="color: #60a5fa; margin-top: 4px; display: block; font-weight: 500;">載入中...</span>
             </div>
             <div class="table-container">
@@ -174,12 +176,12 @@
                     <thead>
                         <tr>
                             <th>&#x6A21;&#x5F0F;</th>
+                            <th>&#x5373;&#x6642;&#x6301;&#x5009; / &#x5019;&#x9078;</th>
+                            <th>&#x5373;&#x6642;&#x6D6E;&#x76C8;</th>
                             <th>&#x6A23;&#x672C; / &#x52DD;&#x7387;</th>
                             <th>PF</th>
                             <th>&#x5E73;&#x5747;&#x8D0F; / &#x8F38;</th>
                             <th>&#x671F;&#x671B;&#x503C;</th>
-                            <th>&#x6700;&#x5927;&#x9023;&#x8667;</th>
-                            <th>&#x6700;&#x5927;&#x8667;&#x640D;</th>
                             <th>&#x5B78;&#x7FD2;&#x72C0;&#x614B;</th>
                         </tr>
                     </thead>
@@ -231,6 +233,15 @@
 
         <section class="data-panel">
             <div class="panel-head">
+                <h2>&#x958B;&#x55AE;&#x6548;&#x7387;&#x8A3A;&#x65B7;</h2>
+                <span class="hint">&#x8CC7;&#x6599;&#x4F86;&#x6E90;&#xFF1A;/api/trades &#x5019;&#x9078;&#x55AE;&#x8207;&#x963B;&#x64CB;&#x539F;&#x56E0;</span>
+            </div>
+            <div id="entry-efficiency-summary" class="history-summary"></div>
+            <div id="entry-block-reasons" class="symbol-cloud"></div>
+        </section>
+
+        <section class="data-panel">
+            <div class="panel-head">
                 <h2>&#x5E02;&#x5834;&#x96F7;&#x9054;</h2>
                 <span id="intel-logic" class="hint"></span>
             </div>
@@ -256,6 +267,7 @@
                 <h2>&#x5DF2;&#x5E73;&#x5009;&#x7D00;&#x9304;</h2>
                 <span class="hint">OKX &#x5BE6;&#x969B;&#x5DF2;&#x5BE6;&#x73FE;&#x640D;&#x76CA;&#xFF08;&#x542B;&#x624B;&#x7E8C;&#x8CBB;&#x8207;&#x8CC7;&#x91D1;&#x8CBB;&#xFF09;</span>
             </div>
+            <div id="history-summary" class="history-summary"></div>
             <div class="table-container compact">
                 <table>
                     <thead>
@@ -273,6 +285,7 @@
             </div>
         </section>
     </div>
-    <script src="app.js?v=35"></script>
+    <script src="app.js?v=44"></script>
+    <script src="app-v13-canonical.js?v=6"></script>
 </body>
 </html>

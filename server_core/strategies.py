@@ -8,11 +8,39 @@ from pathlib import Path
 import pandas as pd
 from . import config
 from . import state
-from .utils import as_float, clamp, write_json_atomic
+from .utils import as_float, clamp, write_json_atomic, learning_cutoff_ms, timestamp_ms
 from types import SimpleNamespace
 
 def strategy_profile(strategy_name):
     return config.STRATEGY_PROFILES.get(strategy_name, config.STRATEGY_PROFILES['SqueezeHunter'])
+
+def zero_sample_training_optimizer(strategy_name, planned_rr=0.0, entry_slippage_pct=0.0):
+    profile = strategy_profile(strategy_name)
+    return {
+        'strategy': strategy_name,
+        'state': 'explore',
+        'rr_mult': 1.0,
+        'profit_mult': 0.90,
+        'cooldown_mult': 0.85,
+        'tolerance_mult': 1.10,
+        'target_rr_mult': 1.0,
+        'min_profit_mult': 0.90,
+        'entry_edge_mult': 1.0,
+        'min_rr': profile['min_rr'],
+        'planned_rr_median': round(as_float(planned_rr), 4),
+        'entry_slippage_pct': round(as_float(entry_slippage_pct), 4),
+        'sample_size': 0,
+        'profit_factor': 0.0,
+        'expectancy': 0.0,
+        'win_rate': 0.0,
+        'closed_sample': 0,
+        'tuned_sl_atr': None,
+    }
+
+def is_zero_sample_optimizer(opt):
+    if not isinstance(opt, dict):
+        return False
+    return int(opt.get('sample_size') or 0) <= 0 and int(opt.get('closed_sample') or 0) <= 0
 
 def category_profile(category):
     for key, profile in config.CATEGORY_PROFILES.items():
@@ -32,11 +60,11 @@ def strategy_category_permission(strategy_name, category, perf=None):
     cat_lower = str(category or '').lower()
     if strategy_name == 'SqueezeHunter':
         allowed = any(kw in cat_lower for kw in ['squeeze', 'alpha', '費率', '獨立'])
-        return allowed, "SqueezeHunter restricted to Squeeze/Alpha categories" if not allowed else (True, '')
+        return (allowed, '') if allowed else (False, "SqueezeHunter restricted to Squeeze/Alpha categories")
     
     if strategy_name == 'MacroSniper':
         allowed = not any(kw in cat_lower for kw in ['oversold', '超跌'])
-        return allowed, "MacroSniper restricted from Oversold category" if not allowed else (True, '')
+        return (allowed, '') if allowed else (False, "MacroSniper restricted from Oversold category")
         
     return True, ''
 
@@ -108,14 +136,31 @@ def strategy_performance(strategy_name, limit=120):
         
     rows = realized_rows_func(strategy_name, limit)
     total_trades = len(rows)
+    sample_min = int(getattr(config, 'CORE_TRADE_MIN_SAMPLE', 30) or 30)
     if total_trades == 0:
-        return {
+        result = {
             'strategy': strategy_name, 'total_trades': 0, 'win_rate': 0.0,
             'profit_factor': 0.0, 'expectancy': 0.0, 'total_pnl': 0.0,
             'max_drawdown': 0.0, 'tier': 'D (Training/Explore)', 'state': 'explore',
             'verdict': 'learning',
-            'net_wins': 0, 'funding_excluded': True, 'win_count': 0, 'loss_count': 0
+            'net_wins': 0, 'funding_excluded': True, 'win_count': 0, 'loss_count': 0,
+            'pnl_source': 'verified_history_alphaPnl',
+            'pnl_source_label': '來源：已驗證歷史 / alphaPnl',
+            'pnl_basis': 'alphaPnl',
+            'has_effective_sample': False,
+            'sample_ready': False,
+            'stable_sample_ready': False,
+            'effective_sample_min': 1,
+            'stable_sample_min': sample_min,
+            'sample_deficit': 1,
+            'stable_sample_deficit': sample_min,
+            'sample_gate': 'no verified learnable closed trades',
         }
+        result['execution_probe_reason'] = performance_probe_reason_for_perf(result)
+        result['execution_limited'] = bool(result['execution_probe_reason'])
+        result['execution_block_reason'] = performance_block_reason_for_perf(result)
+        result['execution_blocked'] = bool(result['execution_block_reason'])
+        return result
     
     wins = [as_float(r.get('alphaPnl', r.get('realizedPnl'))) for r in rows if as_float(r.get('alphaPnl', r.get('realizedPnl'))) > 0]
     losses = [as_float(r.get('alphaPnl', r.get('realizedPnl'))) for r in rows if as_float(r.get('alphaPnl', r.get('realizedPnl'))) <= 0]
@@ -162,14 +207,30 @@ def strategy_performance(strategy_name, limit=120):
     verdict_map = {'exploit': 'scale_up', 'steady': 'keep', 'recover': 'reduce', 'explore': 'learning'}
     verdict = verdict_map.get(state_verdict, 'learning')
 
-    return {
+    result = {
         'strategy': strategy_name, 'total_trades': total_trades, 'win_rate': round(win_rate, 2),
         'profit_factor': round(profit_factor, 3), 'expectancy': round(expectancy, 4),
         'total_pnl': round(total_pnl, 4), 'max_drawdown': round(max_dd, 4),
         'tier': tier, 'state': state_verdict, 'verdict': verdict,
         'net_wins': win_count - loss_count,
-        'funding_excluded': True, 'win_count': win_count, 'loss_count': loss_count
+        'funding_excluded': True, 'win_count': win_count, 'loss_count': loss_count,
+        'pnl_source': 'verified_history_alphaPnl',
+        'pnl_source_label': '來源：已驗證歷史 / alphaPnl',
+        'pnl_basis': 'alphaPnl',
+        'has_effective_sample': total_trades > 0,
+        'sample_ready': total_trades > 0,
+        'stable_sample_ready': total_trades >= sample_min,
+        'effective_sample_min': 1,
+        'stable_sample_min': sample_min,
+        'sample_deficit': max(0, 1 - total_trades),
+        'stable_sample_deficit': max(0, sample_min - total_trades),
+        'sample_gate': 'verified learnable closed trades only',
     }
+    result['execution_probe_reason'] = performance_probe_reason_for_perf(result)
+    result['execution_limited'] = bool(result['execution_probe_reason'])
+    result['execution_block_reason'] = performance_block_reason_for_perf(result)
+    result['execution_blocked'] = bool(result['execution_block_reason'])
+    return result
 
 def optimizer_manifest_path():
     return Path(config.GLOBAL_OPTIMIZER_FILE)
@@ -265,6 +326,13 @@ def build_training_optimizer(strategy_name, perf=None, cycle_state=None):
     expectancy = as_float(perf.get('expectancy'))
     win_rate = as_float(perf.get('win_rate'))
     sample = int(perf.get('total_trades') or 0)
+
+    if sample <= 0 and int(quality.get('closed_sample') or 0) <= 0:
+        return zero_sample_training_optimizer(
+            strategy_name,
+            planned_rr=quality.get('median_planned_rr'),
+            entry_slippage_pct=quality.get('median_entry_slippage_pct'),
+        )
 
     pressure = 0.0
     if pf < 0.80:
@@ -411,8 +479,28 @@ def run_training_cycle(force_history=False):
             for row in reversed(state.trade_journal or [])
             if row.get('status') == 'closed' or row.get('closed_at')
         ]
-    manual_rows = [row for row in history if _is_explicit_manual_history_row(row)]
-    total_history = len(history)
+
+    cutoff_ms = learning_cutoff_ms()
+
+    def row_after_cutoff(row):
+        row_ms = timestamp_ms(
+            row.get('closed_at')
+            or row.get('lastUpdateTimestamp')
+            or row.get('timestamp')
+            or row.get('uTime')
+            or row.get('updated_at')
+        )
+        return row_ms >= cutoff_ms if cutoff_ms > 0 and row_ms > 0 else False
+
+    scoped_history = [row for row in history if row_after_cutoff(row)]
+    learnable_history = [
+        row for row in scoped_history
+        if row.get('eligible_for_learning') is True
+        and row.get('accounting_status') == 'verified'
+        and version_matches_strategy_scope(row.get('strategy_version'))
+    ]
+    manual_rows = [row for row in learnable_history if _is_explicit_manual_history_row(row)]
+    total_history = len(learnable_history)
     manual_ratio = (len(manual_rows) / total_history) if total_history else 0.0
 
     perf = all_strategy_performance()
@@ -550,6 +638,12 @@ def auto_tune_strategy_params(strategy_name, perf=None):
                 opt['target_rr_mult'] = opt.get('target_rr_mult', opt.get('rr_mult', 1.0))
                 opt['entry_edge_mult'] = opt.get('entry_edge_mult', 1.0)
                 opt['min_rr'] = opt.get('min_rr', strategy_profile(strategy_name)['min_rr'])
+                if is_zero_sample_optimizer(opt):
+                    return zero_sample_training_optimizer(
+                        strategy_name,
+                        planned_rr=opt.get('planned_rr_median'),
+                        entry_slippage_pct=opt.get('entry_slippage_pct'),
+                    )
                 return opt
         except Exception:
             pass
@@ -600,12 +694,31 @@ def auto_tune_strategy_params(strategy_name, perf=None):
         'min_rr': strategy_profile(strategy_name)['min_rr'],
     }
 
-def performance_block_reason(strategy_name):
-    perf = strategy_performance(strategy_name)
+def performance_probe_reason_for_perf(perf):
+    sample = int(perf.get('total_trades') or 0)
+    pf = as_float(perf.get('profit_factor'))
+    expectancy = as_float(perf.get('expectancy'))
+    early_sample = int(getattr(config, 'EARLY_LOSS_FIREWALL_MIN_SAMPLE', 8) or 8)
+    early_pf = as_float(getattr(config, 'EARLY_LOSS_FIREWALL_MAX_PF', 0.75), 0.75)
+    early_expectancy = as_float(getattr(config, 'EARLY_LOSS_FIREWALL_MAX_EXPECTANCY', 0.0), 0.0)
+    if sample >= early_sample and pf < early_pf and expectancy < early_expectancy:
+        return (
+            f"training probe: sample={sample}, pf={pf} < {early_pf} "
+            f"and expectancy={expectancy} < {early_expectancy}; reduced-size sample collection"
+        )
+    return None
+
+def performance_block_reason_for_perf(perf):
+    probe_reason = performance_probe_reason_for_perf(perf)
+    if probe_reason and not getattr(config, 'TRAINING_PROBE_ENABLED', False):
+        return probe_reason.replace('training probe:', 'early loss firewall:') + '; shadow-only until recovery'
     if perf['total_trades'] >= config.CORE_TRADE_MIN_SAMPLE:
         if perf['profit_factor'] < config.CORE_TRADE_MIN_PROFIT_FACTOR or perf['expectancy'] < config.CORE_TRADE_MIN_EXPECTANCY:
             return f"blocked: pf={perf['profit_factor']} < {config.CORE_TRADE_MIN_PROFIT_FACTOR} or expectancy={perf['expectancy']} < {config.CORE_TRADE_MIN_EXPECTANCY}"
     return None
+
+def performance_block_reason(strategy_name):
+    return performance_block_reason_for_perf(strategy_performance(strategy_name))
 
 def apply_rehab_sizing_if_needed(sizing_plan, mode_verdict, leverage, optimizer=None):
     plan = dict(sizing_plan)
@@ -617,6 +730,14 @@ def apply_rehab_sizing_if_needed(sizing_plan, mode_verdict, leverage, optimizer=
         plan['margin_usdt'] = 0.0
         plan['target_notional'] = 0.0
         plan['risk_rule'] = 'strategy execution paused by optimizer'
+        return plan
+
+    if optimizer and optimizer.get('training_probe'):
+        probe_margin = as_float(getattr(config, 'TRAINING_PROBE_MARGIN_USDT', 8.0), 8.0)
+        plan['margin_usdt'] = probe_margin
+        plan['target_notional'] = round(probe_margin * leverage, 2)
+        plan['risk_rule'] = 'training probe: reduced-size sample collection under loss firewall'
+        plan['training_probe'] = True
         return plan
 
     if state_verdict == 'explore':
@@ -644,12 +765,21 @@ def apply_rehab_sizing_if_needed(sizing_plan, mode_verdict, leverage, optimizer=
 
 def get_confidence_score(strategy_name, category):
     perf = strategy_performance(strategy_name)
-    pf = perf['profit_factor']
+    pf = as_float(perf.get('profit_factor'))
+    win_rate = as_float(perf.get('win_rate'))
+    sample = int(perf.get('total_trades') or 0)
+    sample_min = int(getattr(config, 'CORE_TRADE_MIN_SAMPLE', 30) or 30)
     
     score = 1.0
-    if pf > 1.40: score += 0.35
-    elif pf > 1.20: score += 0.15
-    elif pf < 0.90: score -= 0.25
+    if sample <= 0:
+        score = 0.55
+    else:
+        sample_weight = clamp(sample / max(1, sample_min), 0.25, 1.0)
+        pf_component = clamp((pf - 1.0) * 0.75, -0.35, 0.45)
+        win_component = clamp((win_rate - 50.0) / 100.0, -0.20, 0.25)
+        score += (pf_component + win_component) * sample_weight
+        if pf < 0.90 or win_rate < 42:
+            score -= 0.20 * sample_weight
     
     _, cat_prof = category_profile(category)
     score *= cat_prof['margin_mult']
@@ -834,16 +964,34 @@ def create_macro_trend_setup(df, trends, htf_bull, htf_bear):
     if not is_bullish and not is_bearish:
         return None
 
+    previous_close = as_float(previous.get('close'))
+    current_open = as_float(df['open'].iloc[-1])
     breakout = as_float(df['close'].iloc[-1]) > as_float(df['bb_upper'].iloc[-2]) if is_bullish else as_float(df['close'].iloc[-1]) < as_float(df['bb_lower'].iloc[-2])
     direction = 'bullish' if is_bullish else 'bearish'
 
     if direction == 'bullish':
+        pullback_resume = (
+            as_float(previous.get('low')) <= ema20
+            and current > ema20
+            and current > previous_close
+            and current > current_open
+        )
+        if not breakout and not pullback_resume:
+            return None
         entry_reference = as_float(previous['high']) if breakout else ema20
         stop_reference = min(as_float(signal_low(df)), as_float(df.tail(5)['low'].min())) - avg_range * 0.10
         risk = max(current - stop_reference, avg_range * 0.70)
         target_reference = current + risk * 1.65
         name = 'Macro Trend Long'
     else:
+        pullback_resume = (
+            as_float(previous.get('high')) >= ema20
+            and current < ema20
+            and current < previous_close
+            and current < current_open
+        )
+        if not breakout and not pullback_resume:
+            return None
         entry_reference = as_float(previous['low']) if breakout else ema20
         stop_reference = max(as_float(signal_high(df)), as_float(df.tail(5)['high'].max())) + avg_range * 0.10
         risk = max(stop_reference - current, avg_range * 0.70)
@@ -951,11 +1099,19 @@ def create_mode_direct_setup(strategy_name, df, trends, htf_bull, htf_bear):
 
     if strategy_name == 'SqueezeHunter':
         if squeeze_hunter_release_ready(df):
-            # Directional squeeze breakout
-            direction = 'bullish' if signal['close'] > previous['high'] and signal['close'] > df['bb_mid'].iloc[-1] else 'bearish'
-            if direction == 'bullish' and bull_reversal:
+            long_breakout = (
+                signal['close'] > previous['high']
+                and signal['close'] > df['bb_mid'].iloc[-1]
+                and signal['close'] > df['bb_upper'].iloc[-1]
+            )
+            short_breakout = (
+                signal['close'] < previous['low']
+                and signal['close'] < df['bb_mid'].iloc[-1]
+                and signal['close'] < df['bb_lower'].iloc[-1]
+            )
+            if long_breakout and bull_reversal:
                 return build_direct_mode_setup(df, 'bullish', 'Squeeze Expansion Long', signal['close'], df['bb_lower'].iloc[-1], df['bb_upper'].iloc[-1] + avg_range * 0.95)
-            elif direction == 'bearish' and bear_reversal:
+            elif short_breakout and bear_reversal:
                 return build_direct_mode_setup(df, 'bearish', 'Squeeze Expansion Short', signal['close'], df['bb_upper'].iloc[-1], df['bb_lower'].iloc[-1] - avg_range * 0.95)
 
     return None
@@ -1097,6 +1253,20 @@ def evaluate_mode_gate(strategy_name, direction, rsi, trends, in_prz, true_rr, t
         was_squeezed = any(df.tail(8)['is_squeezed'])
         if not was_squeezed:
             return False, 'SqueezeHunter: no volatility squeeze detected in last 8 candles'
+        if direction == 'bullish':
+            if not (
+                last_candle['close'] > prev_candle['high']
+                and last_candle['close'] > last_candle['bb_mid']
+                and last_candle['close'] > last_candle['bb_upper']
+            ):
+                return False, 'SqueezeHunter: bullish setup lacks confirmed upper-band breakout'
+        elif direction == 'bearish':
+            if not (
+                last_candle['close'] < prev_candle['low']
+                and last_candle['close'] < last_candle['bb_mid']
+                and last_candle['close'] < last_candle['bb_lower']
+            ):
+                return False, 'SqueezeHunter: bearish setup lacks confirmed lower-band breakout'
 
     return True, ''
 
@@ -1342,6 +1512,18 @@ def build_bot_report(visible_trades=None, live_positions=None):
 
     live_active = [t for t in active if t.get('source') == 'okx_live']
     tracked_active = [t for t in active if t.get('source') != 'okx_live']
+    active_modes = []
+    for name in config.STRATEGY_PROFILES:
+        mode_rows = [t for t in active if str(t.get('strategy') or '') == name]
+        if not mode_rows:
+            continue
+        active_modes.append({
+            'strategy': name,
+            'label': strategy_profile(name)['label'],
+            'active_count': len(mode_rows),
+            'active_pnl': round(sum(float(t.get('pnl') or 0) for t in mode_rows), 4),
+            'source': 'okx_live_snapshot',
+        })
 
     verdict = 'Monitoring active positions.'
     if orphan_positions and not active:
@@ -1369,9 +1551,19 @@ def build_bot_report(visible_trades=None, live_positions=None):
         'session_active_pnl': round(session_active_pnl, 4),
         'session_realized_pnl': round(session_realized_pnl, 4),
         'session_started_at': config.SESSION_STARTED_AT,
+        'session_scope_note': 'session_* only counts positions opened after this process started; positions list is the OKX live snapshot.',
         'live_modes': live_modes,
+        'active_modes': active_modes,
+        'active_mode_summary': {
+            item['strategy']: {
+                'active_count': item['active_count'],
+                'active_pnl': item['active_pnl'],
+            }
+            for item in active_modes
+        },
         'weak_modes': weak_modes,
         'positions': [watch_item(t) for t in live_active[:8]],
+        'position_source': 'okx_live_snapshot',
         'tracked_positions': [watch_item(t) for t in tracked_active[:8]],
         'orphan_positions': [watch_item(t) for t in orphan_positions[:8]],
         'training_cycle': training_cycle,

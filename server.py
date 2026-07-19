@@ -104,13 +104,16 @@ if __name__ == '__main__':
         
     def update_symbols_loop():
         while True:
-            time.sleep(3600)  # Refresh every 1 hour
+            time.sleep(int(getattr(config, 'MARKET_UNIVERSE_REFRESH_SECONDS', 3600) or 3600))
             try:
                 new_symbols, new_cats = okx_client.get_top_symbols_and_categories()
                 if new_symbols and len(new_symbols) > 0:
                     state.global_symbols = new_symbols
                     state.global_symbol_categories = new_cats
-                    print(f"[Intelligence] Refreshed Top 30 Markets. Now tracking hottest coins.")
+                    print(
+                        f"[Intelligence] Refreshed top {len(new_symbols)} high-liquidity markets "
+                        f"from {getattr(state, 'market_universe_source', 'unknown')}."
+                    )
             except Exception:
                 pass
                 

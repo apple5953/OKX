@@ -1,3 +1,4 @@
+import math
 import time
 import uuid
 from . import config
@@ -11,6 +12,13 @@ ENTRY_EXECUTION_POLICIES = {
     'Contrarian': {'base_slippage': 0.0005, 'slippage_cap': 0.0015, 'attempts': 3},
     'SqueezeHunter': {'base_slippage': 0.0008, 'slippage_cap': 0.0020, 'attempts': 3},
 }
+
+def okx_client_order_id(prefix, value, max_len=32):
+    raw = f"{prefix}{value}{uuid.uuid4().hex[:6]}"
+    cleaned = ''.join(ch for ch in raw if ch.isalnum())
+    if not cleaned:
+        cleaned = f"{prefix}{uuid.uuid4().hex}"
+    return cleaned[:max_len]
 
 def expected_trade_edge(notional_usdt, tp_dist_pct, market_quality):
     gross_target = max(0.0, notional_usdt) * max(0.0, tp_dist_pct)
@@ -156,6 +164,62 @@ def _place_raw_trade_algo(symbol, ord_type, side, size, params=None):
         raise AttributeError('OKX algo order endpoint unavailable on exchange client')
     return raw_method(payload)
 
+def _safe_algo_price(symbol, value, default='0'):
+    price = as_float(value, 0.0)
+    if price <= 0:
+        return str(default)
+    try:
+        formatted = okx.price_to_precision(symbol, price)
+        if str(formatted).strip():
+            return str(formatted)
+    except Exception:
+        pass
+    return format(price, '.12g')
+
+def _safe_algo_size(symbol, size):
+    amount = abs(as_float(size, 0.0))
+    if amount <= 0:
+        return '0'
+    try:
+        formatted = okx.amount_to_precision(symbol, amount)
+        if str(formatted).strip():
+            return str(formatted)
+    except Exception:
+        pass
+    return format(amount, '.12g')
+
+def _instrument_lot_size(symbol):
+    try:
+        inst_id = resolve_okx_inst_id(symbol)
+        response = okx.public_get_public_instruments({
+            'instType': 'SWAP',
+            'instId': inst_id,
+        })
+        rows = response.get('data') if isinstance(response, dict) else []
+        if rows:
+            lot_size = as_float(rows[0].get('lotSz'))
+            if lot_size > 0:
+                return lot_size
+    except Exception:
+        pass
+    return 0.0
+
+def _safe_order_size(symbol, size):
+    amount = abs(as_float(size, 0.0))
+    if amount <= 0:
+        return 0.0
+    lot_size = _instrument_lot_size(symbol)
+    if lot_size > 0:
+        steps = math.floor((amount / lot_size) + 1e-9)
+        amount = steps * lot_size
+    if amount <= 0:
+        return 0.0
+    try:
+        formatted = okx.amount_to_precision(symbol, amount)
+        return as_float(formatted)
+    except Exception:
+        return as_float(format(amount, '.12g'))
+
 def refresh_order(order, symbol):
     if not isinstance(order, dict):
         return order
@@ -285,66 +349,204 @@ def rebase_plan_to_fill(plan, signal_price, fill_price, direction):
     plan['tp_dist_pct'] = round(tp_distance / fill_price, 5)
     return plan
 
+def _algo_rows(response):
+    if not isinstance(response, dict):
+        return []
+    rows = response.get('data') or []
+    return [row for row in rows if isinstance(row, dict)]
+
+def _algo_has_take_profit_and_stop_loss(algo):
+    linked = algo.get('linkedAlgoOrd') or {}
+    rows = [algo]
+    if isinstance(linked, dict):
+        rows.append(linked)
+    has_tp = any(
+        as_float(row.get('tpTriggerPx')) > 0 or as_float(row.get('tpOrdPx')) > 0
+        for row in rows
+        if isinstance(row, dict)
+    )
+    has_sl = any(
+        as_float(row.get('slTriggerPx')) > 0 or as_float(row.get('slOrdPx')) > 0
+        for row in rows
+        if isinstance(row, dict)
+    )
+    return has_tp and has_sl
+
+def _algo_identifier_matches(algo, expected_ids):
+    if not expected_ids:
+        return True
+    linked = algo.get('linkedAlgoOrd') or {}
+    identifiers = {
+        str(algo.get('algoId') or ''),
+        str(algo.get('algoClOrdId') or ''),
+        str(algo.get('clOrdId') or ''),
+    }
+    if isinstance(linked, dict):
+        identifiers.update({
+            str(linked.get('algoId') or ''),
+            str(linked.get('algoClOrdId') or ''),
+            str(linked.get('clOrdId') or ''),
+        })
+    return bool({value for value in identifiers if value} & expected_ids)
+
+def _fetch_pending_protection_algos():
+    rows = []
+    raw_method = getattr(okx, 'private_get_trade_orders_algo_pending', None) or getattr(okx, 'privateGetTradeOrdersAlgoPending', None)
+    if raw_method is None:
+        raise AttributeError('OKX pending algo endpoint unavailable on exchange client')
+    for ord_type in ['oco', 'conditional']:
+        response = raw_method({'instType': 'SWAP', 'ordType': ord_type})
+        failed, code, message = okx_algo_amend_error(response)
+        if failed:
+            raise RuntimeError(f'OKX pending algo query failed ({ord_type}): {code} {message}')
+        rows.extend(_algo_rows(response))
+    return rows
+
+def verify_exact_fill_protection(symbol, close_side, filled_size, expected_algo_id=None, expected_client_id=None):
+    inst_id = resolve_okx_inst_id(symbol)
+    expected_ids = {str(value) for value in [expected_algo_id, expected_client_id] if value}
+    min_size = abs(as_float(filled_size)) * 0.98
+    deadline = time.monotonic() + max(0.0, float(getattr(config, 'PROTECTION_VERIFY_TIMEOUT_SECONDS', 8.0)))
+    poll_seconds = max(0.1, float(getattr(config, 'PROTECTION_VERIFY_POLL_SECONDS', 0.5)))
+    last_error = None
+    while time.monotonic() <= deadline:
+        try:
+            for algo in _fetch_pending_protection_algos():
+                if algo.get('instId') != inst_id or algo.get('side') != close_side:
+                    continue
+                if not _algo_identifier_matches(algo, expected_ids):
+                    continue
+                if min_size > 0 and as_float(algo.get('sz')) < min_size:
+                    continue
+                if _algo_has_take_profit_and_stop_loss(algo):
+                    return algo
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+        time.sleep(poll_seconds)
+    if last_error:
+        raise RuntimeError(f'OKX TP/SL verification failed: {last_error}')
+    raise RuntimeError(f'OKX TP/SL verification failed: no live TP/SL algo found for {inst_id} {close_side}')
+
 def place_exact_fill_protection(symbol, direction, filled_size, plan, client_order_id):
     close_side = 'sell' if direction == 'long' else 'buy'
-    protection_id = f"P{client_order_id}"[:32]
+    protection_id = okx_client_order_id('P', client_order_id)
+    size_value = _safe_algo_size(symbol, filled_size)
+    tp_trigger = _safe_algo_price(symbol, plan['tp1'])
+    sl_trigger = _safe_algo_price(symbol, plan['sl'])
     params = {
         'clOrdId': protection_id,
         'reduceOnly': True,
-        'tpTriggerPx': str(plan['tp1']),
-        'tpOrdPx': str(plan['tp1']),
+        'tpTriggerPx': tp_trigger,
+        'tpOrdPx': '-1',
         'tpTriggerPxType': 'last',
-        'slTriggerPx': str(plan['sl']),
+        'slTriggerPx': sl_trigger,
         'slOrdPx': '-1',
         'slTriggerPxType': 'mark',
         'cxlOnClosePos': True,
     }
-    try:
-        response = _place_raw_trade_algo(symbol, 'oco', close_side, filled_size, params)
-        if _order_result_success(response):
-            return {
-                'id': response.get('data', [{}])[0].get('algoId') if isinstance(response.get('data'), list) and response.get('data') else response.get('algoId') or f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
-                'clientOrderId': protection_id,
-                'info': response,
-            }
-        raise RuntimeError(str(response))
-    except Exception as exc:
-        if config.MOCK_MODE:
-            return {
-                'id': f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
-                'clientOrderId': protection_id,
-                'info': {
-                    'code': '0',
-                    'msg': f'simulated protection: {exc}',
-                    'data': [{
-                        'algoId': f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
-                        'sCode': '0',
-                        'sMsg': 'simulated protection',
-                    }],
-                },
-            }
-        raise
+    last_exc = None
+    last_response = None
+    for attempt in range(3):
+        try:
+            response = _place_raw_trade_algo(symbol, 'oco', close_side, size_value, params)
+            last_response = response
+            if _order_result_success(response):
+                response_algo_id = response.get('data', [{}])[0].get('algoId') if isinstance(response.get('data'), list) and response.get('data') else response.get('algoId')
+                verified_algo = verify_exact_fill_protection(
+                    symbol,
+                    close_side,
+                    filled_size,
+                    expected_algo_id=response_algo_id,
+                    expected_client_id=protection_id,
+                )
+                verified_algo_id = verified_algo.get('algoId') or response_algo_id
+                return {
+                    'id': verified_algo_id,
+                    'clientOrderId': protection_id,
+                    'info': response,
+                    'verified_algo': verified_algo,
+                }
+            last_exc = RuntimeError(str(response))
+        except Exception as exc:
+            last_exc = exc
+        if attempt < 2:
+            time.sleep(0.35 * (attempt + 1))
+    if config.MOCK_MODE:
+        failure_reason = last_exc or last_response or 'simulated protection failed'
+        return {
+            'id': f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
+            'clientOrderId': protection_id,
+            'info': {
+                'code': '0',
+                'msg': f'simulated protection: {failure_reason}',
+                'data': [{
+                    'algoId': f"SIM-ALGO-{uuid.uuid4().hex[:16]}",
+                    'sCode': '0',
+                    'sMsg': 'simulated protection',
+                }],
+            },
+        }
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(str(last_response or 'Protection placement failed'))
+
+def _close_reduce_only_in_chunks(symbol, direction, filled_size, extra):
+    close_side = 'sell' if direction == 'long' else 'buy'
+    remaining = abs(as_float(filled_size))
+    if remaining <= 0:
+        return []
+    max_contracts = fetch_exchange_max_contracts(symbol, close_side)
+    if max_contracts == float('inf') or max_contracts <= 0:
+        max_contracts = remaining
+    chunk_limit = max(1.0, max_contracts * 0.90)
+    results = []
+
+    while remaining > 0:
+        chunk = min(remaining, chunk_limit)
+        chunk = _safe_order_size(symbol, chunk)
+        if chunk <= 0:
+            raise RuntimeError(f'Cannot format valid reduce-only close size for {symbol}: remaining={remaining}')
+        try:
+            result = _place_raw_trade_order(symbol, 'market', close_side, chunk, None, extra)
+            if not _order_result_success(result):
+                raise RuntimeError(str(result))
+            results.append(result)
+            remaining = max(0.0, remaining - chunk)
+            if remaining > 0:
+                rounded_remaining = _safe_order_size(symbol, remaining)
+                remaining = rounded_remaining if rounded_remaining > 0 else 0.0
+            time.sleep(0.12)
+        except Exception as e:
+            err_str = str(e)
+            if '51169' in err_str:
+                if results:
+                    return results
+                raise
+            if ('51202' in err_str or 'Market order amount exceeds the maximum amount' in err_str) and chunk > 1:
+                chunk_limit = max(1.0, chunk / 2.0)
+                continue
+            if ('51121' in err_str or 'multiple of the lot size' in err_str) and chunk > 1:
+                chunk_limit = max(1.0, chunk / 2.0)
+                continue
+            raise
+    return results
 
 def emergency_close_unprotected(symbol, direction, filled_size):
     """Close a position in Net Mode. Returns (success, error_code, error_msg)."""
-    close_side = 'sell' if direction == 'long' else 'buy'
     payload_variants = [
+        {'reduceOnly': True, 'posSide': 'net'},
         {'reduceOnly': True, 'posSide': 'long' if direction == 'long' else 'short'},
         {'reduceOnly': True},
-        {'reduceOnly': True, 'posSide': 'net'},
     ]
     last_exc = None
     for extra in payload_variants:
         try:
-            result = _place_raw_trade_order(symbol, 'market', close_side, filled_size, None, extra)
-            if not _order_result_success(result):
-                raise RuntimeError(str(result))
+            _close_reduce_only_in_chunks(symbol, direction, filled_size, extra)
             return True, '0', ''
         except Exception as e:
             last_exc = e
-            err_str = str(e)
-            # 51169 = no positions in this direction (already closed)
-            if '51169' in err_str:
+            if '51169' in str(e):
                 return False, '51169', 'Position already closed or does not exist'
             continue
     if config.MOCK_MODE:
@@ -387,6 +589,7 @@ def protective_algo_targets(all_algos, inst_id, expected_side, tracked_algo_ids=
             target = {
                 'instId': algo.get('instId'),
                 'algoId': linked_id,
+                'sz': linked.get('sz') or algo.get('sz'),
                 'slTriggerPx': linked.get('slTriggerPx') or algo.get('slTriggerPx'),
                 'tpTriggerPx': linked.get('tpTriggerPx') or algo.get('tpTriggerPx'),
                 'tpOrdPx': linked.get('tpOrdPx') or algo.get('tpOrdPx'),
@@ -403,6 +606,19 @@ def protective_algo_targets(all_algos, inst_id, expected_side, tracked_algo_ids=
             targets.append(target)
             seen.add(key)
     return targets
+
+def protection_algos_cover_size(protective_algos, required_size, tolerance=0.995):
+    required = abs(as_float(required_size))
+    if required <= 0:
+        return False
+    total = 0.0
+    for algo in protective_algos or []:
+        if not isinstance(algo, dict):
+            continue
+        if not _algo_has_take_profit_and_stop_loss(algo):
+            continue
+        total += abs(as_float(algo.get('sz')))
+    return total >= required * tolerance
 
 def protection_retry_delay(failure_count):
     return min(
